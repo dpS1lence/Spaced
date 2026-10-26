@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
@@ -5,10 +6,11 @@ using Random = Unity.Mathematics.Random;
 
 namespace Spaced
 {
-    /// <summary>A group of satellites going up together: one or more Falcon 9 missions from one pad.</summary>
+    /// <summary>A group of satellites going up together: one or more Falcon 9 or Starship missions from one pad.</summary>
     public sealed class LaunchCampaign
     {
         public string Name;
+        public LaunchVehicle Vehicle = LaunchVehicle.Falcon9;
         public SatelliteClass Class;
         public bool Maneuverable;
         public LaunchSite Site;
@@ -20,6 +22,11 @@ namespace Spaced
         public bool WatchAll;
         /// <summary>Fleet group the satellites join once deployed.</summary>
         public int Group = -1;
+        /// <summary>Set for a Moon mission: what the spacecraft does once the rocket has put it in its parking orbit.</summary>
+        public LunarMissionKind? Lunar;
+        public LunarSpacecraft LunarCraft;
+        /// <summary>Career contract this campaign fulfils, or -1.</summary>
+        public int Contract = -1;
         public readonly List<LaunchMission> Missions = new List<LaunchMission>();
         public int Deployed;
 
@@ -44,6 +51,8 @@ namespace Spaced
         public uint FirstSatelliteId;
         public bool Done;
         public double FinishedJd = double.NaN;
+        /// <summary>Weather scrubs so far; after a few the launch director accepts marginal weather.</summary>
+        public int Scrubs;
 
         public bool Scheduled => !double.IsNaN(LiftoffJd);
         public OrbitElements Plane => Campaign.Slots[SlotIndices[0]].Elements;
@@ -66,9 +75,10 @@ namespace Spaced
     }
 
     /// <summary>
-    /// Schedules and flies Falcon 9 missions: picks launch windows when the pad passes under each target plane,
-    /// runs the flight physics, parks the droneship, deploys the satellites as trains that raise into their
-    /// slots, and directs the camera through the interesting moments while time is slowed down.
+    /// Schedules and flies Falcon 9 and Starship missions: picks launch windows when the pad passes under each
+    /// target plane, runs the flight physics, parks the droneship (or readies the tower's arms), deploys the
+    /// satellites as trains that raise into their slots, and directs the camera through the interesting moments
+    /// while time is slowed down.
     /// </summary>
     [DefaultExecutionOrder(-40)]
     public sealed class LaunchManager : MonoBehaviour
@@ -87,8 +97,13 @@ namespace Spaced
         public bool Director = true;
         /// <summary>While watching a launch: hide satellites and panels, light the rocket like a broadcast.</summary>
         public bool CinematicMode = true;
+        /// <summary>Pad forecasts for the go/no-go (optional).</summary>
+        public WeatherService Weather;
+        public const int MaxScrubs = 3;
 
         public readonly List<LaunchCampaign> Campaigns = new List<LaunchCampaign>();
+        /// <summary>Every event of every flown launch (liftoff, landings, payload deployment, …).</summary>
+        public event System.Action<LaunchMission, string> FlightEvent;
         public LaunchMission Watched { get; private set; }
 
         SpaceSimulation _sim;
@@ -97,14 +112,17 @@ namespace Spaced
         MaterialLibrary _materials;
         Fx _fx;
         Shader _groundShader;
+        LunarMissionManager _lunar;
         readonly Dictionary<LaunchSite, LaunchSiteView> _sites = new Dictionary<LaunchSite, LaunchSiteView>();
         readonly Dictionary<LaunchSite, double> _padFreeJd = new Dictionary<LaunchSite, double>();
         Random _rng = new Random(0xF9F9F9u);
         int _directorStage = -1;
         int _campaignCounter;
 
-        public void Init(SpaceSimulation sim, CameraRig rig, SatelliteRenderer dots, MaterialLibrary materials, Fx fx, Shader groundShader)
+        public void Init(SpaceSimulation sim, CameraRig rig, SatelliteRenderer dots, MaterialLibrary materials, Fx fx, Shader groundShader,
+            LunarMissionManager lunar)
         {
+            _lunar = lunar;
             _sim = sim;
             _rig = rig;
             _dots = dots;
@@ -124,9 +142,9 @@ namespace Spaced
 
         // ───────────────────────────── Planning ─────────────────────────────
 
-        public static LaunchPlan Plan(SatelliteClass satClass, LaunchSite site, double altitudeKm, double inclinationDeg, int count)
+        public static LaunchPlan Plan(LaunchVehicle vehicle, SatelliteClass satClass, LaunchSite site, double altitudeKm, double inclinationDeg, int count)
         {
-            double capacity = LaunchPlanner.MaxPayloadKg(site, altitudeKm, inclinationDeg);
+            double capacity = LaunchPlanner.MaxPayloadKg(vehicle, site, altitudeKm, inclinationDeg);
             int perLaunch = (int)math.floor(capacity / satClass.MassKg);
             return new LaunchPlan
             {
@@ -137,17 +155,18 @@ namespace Spaced
         }
 
         /// <summary>Creates the missions for a set of slots (grouped by plane) and schedules the first one.</summary>
-        public LaunchCampaign StartCampaign(string name, SatelliteClass satClass, bool maneuverable, LaunchSite site,
+        public LaunchCampaign StartCampaign(string name, LaunchVehicle vehicle, SatelliteClass satClass, bool maneuverable, LaunchSite site,
             List<OrbitSlot> slots, bool anyPlane, bool watchAll, int group = -1)
         {
             var first = slots[0].Elements;
-            var plan = Plan(satClass, site, first.A - EarthConstants.RadiusKm, first.I * MathConst.Rad2Deg, slots.Count);
+            var plan = Plan(vehicle, satClass, site, first.A - EarthConstants.RadiusKm, first.I * MathConst.Rad2Deg, slots.Count);
             if (plan.TooHeavy) return null;
 
             _campaignCounter++;
             var campaign = new LaunchCampaign
             {
                 Name = name,
+                Vehicle = vehicle,
                 Class = satClass,
                 Maneuverable = maneuverable,
                 Site = site,
@@ -182,9 +201,70 @@ namespace Spaced
             Campaigns.Add(campaign);
             ScheduleNext(campaign);
             var firstMission = campaign.Missions[0];
-            _sim.Log($"{name}: {slots.Count:N0} × {satClass.Name} on {campaign.Missions.Count} Falcon 9 launch(es) from {site.ShortName}; " +
+            _sim.Log($"{name}: {slots.Count:N0} × {satClass.Name} on {campaign.Missions.Count} {vehicle.Name} launch(es) from {site.ShortName}; " +
                      $"first liftoff {Astro.ToDateTime(firstMission.LiftoffJd):yyyy-MM-dd HH:mm} UTC");
             return campaign;
+        }
+
+        /// <summary>Payload a Moon mission's rocket carries: the spacecraft, or for Starship the cargo in its hold.</summary>
+        public static double LunarPayloadKg(LaunchVehicle vehicle, LunarSpacecraft craft) =>
+            craft.IsShip ? StarshipLunarCargoKg : craft.WetKg;
+
+        public const double StarshipLunarCargoKg = 60000;
+
+        /// <summary>The rocket a Moon mission flies on: Falcon 9 can't spare the propellant to land its booster.</summary>
+        public static LaunchVehicle LunarRocket(LaunchVehicle vehicle) =>
+            vehicle.Kind == VehicleKind.Starship ? vehicle : vehicle.Expendable();
+
+        /// <summary>
+        /// Schedules one launch to the Moon at the next window from <paramref name="site"/>: the parking orbit's plane
+        /// holds the Moon's position at arrival.
+        /// </summary>
+        public LaunchCampaign StartLunarCampaign(string name, LaunchVehicle vehicle, LaunchSite site, LunarMissionKind kind)
+        {
+            var craft = LunarSpacecraft.For(kind, vehicle.Kind);
+            var rocket = LunarRocket(vehicle);
+            double payload = LunarPayloadKg(rocket, craft);
+            double now = _sim.Clock.JulianDate;
+            _padFreeJd.TryGetValue(site, out double padFree);
+            double earliest = math.max(now + FirstLaunchLeadMinutes / 1440.0, padFree);
+            double liftoff = LunarTargeting.LaunchWindow(site, earliest, out double inclination, out double raan);
+
+            _campaignCounter++;
+            var campaign = new LaunchCampaign
+            {
+                Name = name,
+                Vehicle = rocket,
+                Class = new SatelliteClass { Name = craft.Name, MassKg = (float)payload, SizeM = 4f, DragAreaM2 = 6f, Model = ModelKind.Smallsat },
+                Site = site,
+                Slots = new List<OrbitSlot>
+                {
+                    new OrbitSlot { Elements = OrbitMath.FromAltitudes(LunarTargeting.ParkingAltitudeKm, LunarTargeting.ParkingAltitudeKm, inclination, raan, 0, 0) },
+                },
+                PlanEpochJd = liftoff,
+                SatellitesPerLaunch = 1,
+                WatchAll = true,
+                Lunar = kind,
+                LunarCraft = craft,
+            };
+            var mission = new LaunchMission { Campaign = campaign, Number = 1, Name = name, PayloadKg = payload, AltitudeKm = LunarTargeting.ParkingAltitudeKm, LiftoffJd = liftoff };
+            mission.SlotIndices.Add(0);
+            campaign.Missions.Add(mission);
+            Campaigns.Add(campaign);
+            _padFreeJd[site] = liftoff + PadTurnaroundDays;
+            _sim.Log($"{name}: {craft.Name} on {rocket.Name} from {site.ShortName}; lunar window opens {Astro.ToDateTime(liftoff):yyyy-MM-dd HH:mm} UTC");
+            return campaign;
+        }
+
+        /// <summary>Launches needed for a set of slots: each plane is flown separately, <paramref name="perLaunch"/> at a time.</summary>
+        public static int CountLaunches(List<OrbitSlot> slots, int perLaunch)
+        {
+            if (perLaunch <= 0) return 0;
+            var perPlane = new Dictionary<int, int>();
+            foreach (var slot in slots) perPlane[slot.Plane] = perPlane.TryGetValue(slot.Plane, out int n) ? n + 1 : 1;
+            int launches = 0;
+            foreach (int n in perPlane.Values) launches += (n + perLaunch - 1) / perLaunch;
+            return launches;
         }
 
         void ScheduleNext(LaunchCampaign campaign)
@@ -198,6 +278,38 @@ namespace Spaced
                 ? earliest
                 : LaunchPlanner.NextLaunchWindow(campaign.Site, next.Plane, campaign.PlanEpochJd, earliest);
             _padFreeJd[campaign.Site] = next.LiftoffJd + PadTurnaroundDays;
+        }
+
+        /// <summary>Forecast for a mission's liftoff (unknown when there is no weather service or no data).</summary>
+        public LaunchWeather WeatherFor(LaunchMission mission) =>
+            Weather != null ? Weather.At(mission.Campaign.Site, mission.LiftoffJd, mission.Campaign.Vehicle.Recovery == BoosterRecovery.Droneship) : default;
+
+        /// <summary>
+        /// The go/no-go poll at T-60 s: if the forecast says no-go, stand down and try again at the next opportunity
+        /// (a day later, or the next time the pad passes under the target plane).
+        /// </summary>
+        bool TryScrub(LaunchMission mission)
+        {
+            if (Weather == null || !Weather.ScrubsEnabled || mission.Scrubs >= MaxScrubs) return false;
+            var w = WeatherFor(mission);
+            if (!w.Known || w.Go) return false;
+            var campaign = mission.Campaign;
+            mission.Scrubs++;
+            double retry = mission.LiftoffJd + 0.6;
+            if (campaign.Lunar.HasValue)
+            {
+                mission.LiftoffJd = LunarTargeting.LaunchWindow(campaign.Site, retry, out double inclination, out double raan);
+                campaign.Slots[0] = new OrbitSlot { Elements = OrbitMath.FromAltitudes(LunarTargeting.ParkingAltitudeKm, LunarTargeting.ParkingAltitudeKm, inclination, raan, 0, 0) };
+                campaign.PlanEpochJd = mission.LiftoffJd;
+            }
+            else if (campaign.AnyPlane) mission.LiftoffJd += 1.0;
+            else mission.LiftoffJd = LaunchPlanner.NextLaunchWindow(campaign.Site, mission.Plane, campaign.PlanEpochJd, retry);
+            _padFreeJd.TryGetValue(campaign.Site, out double free);
+            _padFreeJd[campaign.Site] = math.max(free, mission.LiftoffJd + PadTurnaroundDays);
+            string text = $"Scrubbed: {w.Reason}";
+            FlightEvent?.Invoke(mission, text);
+            _sim.Log($"{mission.Name}: launch scrubbed for weather — {w.Reason}. New attempt {Astro.ToDateTime(mission.LiftoffJd):MMM d HH:mm} UTC");
+            return true;
         }
 
         /// <summary>Next mission that has not lifted off yet, across all campaigns.</summary>
@@ -215,6 +327,75 @@ namespace Spaced
             foreach (var c in Campaigns)
                 foreach (var m in c.Missions)
                     if (m.Flight != null && !m.Done) yield return m;
+        }
+
+        // ───────────────────────────── Saving ─────────────────────────────
+
+        /// <summary>Campaigns with launches still to fly. A rocket in the air is saved as not yet launched.</summary>
+        public void WriteSave(SaveData data)
+        {
+            data.CampaignCounter = _campaignCounter;
+            foreach (var c in Campaigns)
+            {
+                if (c.Complete) continue;
+                var save = new CampaignSave
+                {
+                    Name = c.Name, Vehicle = c.Vehicle.Kind, Expendable = c.Vehicle.Recovery == BoosterRecovery.Expended, Class = c.Class,
+                    Maneuverable = c.Maneuverable, AnyPlane = c.AnyPlane, WatchAll = c.WatchAll, Site = System.Array.IndexOf(LaunchSite.All, c.Site),
+                    Group = c.Group, SatellitesPerLaunch = c.SatellitesPerLaunch, Deployed = c.Deployed, PlanEpochJd = c.PlanEpochJd,
+                    LunarKind = c.Lunar.HasValue ? (int)c.Lunar.Value : -1, Contract = c.Contract,
+                };
+                save.Slots.AddRange(c.Slots);
+                foreach (var m in c.Missions)
+                {
+                    var ms = new MissionSave { Number = m.Number, Name = m.Name, PayloadKg = m.PayloadKg, AltitudeKm = m.AltitudeKm,
+                        LiftoffJd = SaveGame.Pack(m.LiftoffJd), Done = m.Done || m.PayloadDeployed };
+                    ms.SlotIndices.AddRange(m.SlotIndices);
+                    save.Missions.Add(ms);
+                }
+                data.Campaigns.Add(save);
+            }
+        }
+
+        public void RestoreSave(SaveData data)
+        {
+            foreach (var m in ActiveMissions().ToArray()) Retire(m);
+            Campaigns.Clear();
+            _padFreeJd.Clear();
+            Watched = null;
+            _campaignCounter = data.CampaignCounter;
+            double jd = _sim.Clock.JulianDate;
+            var late = new List<LaunchMission>();
+            foreach (var save in data.Campaigns)
+            {
+                var vehicle = save.Vehicle == VehicleKind.Starship ? LaunchVehicle.Starship : LaunchVehicle.Falcon9;
+                if (save.Expendable) vehicle = vehicle.Expendable();
+                var site = LaunchSite.All[math.clamp(save.Site, 0, LaunchSite.All.Length - 1)];
+                var campaign = new LaunchCampaign
+                {
+                    Name = save.Name, Vehicle = vehicle, Class = save.Class, Maneuverable = save.Maneuverable, Site = site,
+                    Slots = new List<OrbitSlot>(save.Slots), PlanEpochJd = save.PlanEpochJd, AnyPlane = save.AnyPlane,
+                    SatellitesPerLaunch = save.SatellitesPerLaunch, WatchAll = save.WatchAll, Group = save.Group, Deployed = save.Deployed,
+                    Lunar = save.LunarKind >= 0 ? (LunarMissionKind?)save.LunarKind : null, Contract = save.Contract,
+                };
+                if (campaign.Lunar.HasValue) campaign.LunarCraft = LunarSpacecraft.For(campaign.Lunar.Value, vehicle.Kind);
+                foreach (var ms in save.Missions)
+                {
+                    var mission = new LaunchMission { Campaign = campaign, Number = ms.Number, Name = ms.Name, PayloadKg = ms.PayloadKg,
+                        AltitudeKm = ms.AltitudeKm, LiftoffJd = SaveGame.Unpack(ms.LiftoffJd), Done = ms.Done, PayloadDeployed = ms.Done };
+                    mission.SlotIndices.AddRange(ms.SlotIndices);
+                    campaign.Missions.Add(mission);
+                    if (mission.Scheduled && !mission.Done)
+                    {
+                        _padFreeJd.TryGetValue(site, out double free);
+                        _padFreeJd[site] = math.max(free, mission.LiftoffJd + PadTurnaroundDays);
+                        if (mission.LiftoffJd - RocketFlight.CountdownSeconds / MathConst.SecondsPerDay < jd) late.Add(mission);
+                    }
+                }
+                Campaigns.Add(campaign);
+            }
+            // Launches that were already in the air when the game was saved reach orbit straight away.
+            foreach (var mission in late) ResolveInstantly(mission, jd);
         }
 
         // ───────────────────────────── Cleanup ─────────────────────────────
@@ -293,6 +474,14 @@ namespace Spaced
         public void ViewBoosterOnboard(LaunchMission mission) =>
             _rig.ViewOnboard(() => mission.View != null ? mission.View.BoosterOnboard : null, $"{mission.Name} — booster camera");
 
+        /// <summary>A camera at the foot of the catch tower, looking up at the returning booster.</summary>
+        public void ViewTower(LaunchMission mission)
+        {
+            var site = _sites[mission.Campaign.Site];
+            _rig.ViewFromGround(site.OffsetEcefKm(230, -170, 6), () => mission.View != null && mission.View.BoosterVisible ? mission.View.BoosterCenterKm : (double3?)null,
+                $"{mission.Name} — tower camera");
+        }
+
         public void ViewDroneship(LaunchMission mission)
         {
             if (mission.Droneship == null) return;
@@ -318,6 +507,7 @@ namespace Spaced
                     {
                         if (mission.Scheduled && jd >= mission.LiftoffJd - RocketFlight.CountdownSeconds / MathConst.SecondsPerDay)
                         {
+                            if (TryScrub(mission)) continue;
                             if (fast) ResolveInstantly(mission, jd);
                             else BeginFlight(mission, jd);
                         }
@@ -387,7 +577,7 @@ namespace Spaced
             var campaign = mission.Campaign;
             double3 normal = TargetPlaneNormal(mission);
 
-            mission.Flight = new RocketFlight(campaign.Site, mission.LiftoffJd, mission.PayloadKg, mission.AltitudeKm, normal);
+            mission.Flight = new RocketFlight(campaign.Vehicle, campaign.Site, mission.LiftoffJd, mission.PayloadKg, mission.AltitudeKm, normal);
             // If time warp jumped past T-60 s, catch the flight up.
             double late = (jd - (mission.LiftoffJd - RocketFlight.CountdownSeconds / MathConst.SecondsPerDay)) * MathConst.SecondsPerDay;
             mission.Flight.Advance(late);
@@ -409,8 +599,9 @@ namespace Spaced
             for (; mission.EventCursor < flight.Events.Count; mission.EventCursor++)
             {
                 string text = flight.Events[mission.EventCursor].Text;
+                FlightEvent?.Invoke(mission, text);
                 if (text == "Liftoff" || text.StartsWith("Main engine") || text.StartsWith("Touchdown") || text.StartsWith("Booster lost")
-                    || text.StartsWith("Payload") || text.StartsWith("Vehicle did not"))
+                    || text.StartsWith("Booster caught") || text.StartsWith("Payload") || text.StartsWith("Vehicle did not"))
                     _sim.Log($"{mission.Name}: {text}");
             }
 
@@ -419,6 +610,13 @@ namespace Spaced
                 mission.Droneship = new GameObject(mission.Campaign.Site.DroneshipName).AddComponent<DroneshipView>();
                 mission.Droneship.Init(mission.Campaign.Site.DroneshipName, flight.DroneshipEcefKm, _rig, _materials, _groundShader, _fx);
                 mission.View.AttachDroneship(mission.Droneship);
+            }
+
+            if (flight.PayloadReleased && !mission.PayloadDeployed && mission.Campaign.Lunar != null)
+            {
+                var parking = new SpaceState { R = flight.Position / 1000.0, V = flight.Velocity / 1000.0, Jd = flight.JulianDate };
+                HandOffToLunar(mission, parking, mission.Campaign.LunarCraft.IsShip ? 0 : flight.SecondPropellantKg);
+                return;
             }
 
             if (flight.PayloadReleased && !mission.PayloadDeployed)
@@ -449,9 +647,24 @@ namespace Spaced
         {
             bool wasFlying = mission.Flight != null;
             Retire(mission);
-            if (!wasFlying) mission.LiftoffJd = math.min(mission.LiftoffJd, jd);
+            if (!wasFlying)
+            {
+                mission.LiftoffJd = math.min(mission.LiftoffJd, jd);
+                FlightEvent?.Invoke(mission, "Liftoff");
+            }
 
             var campaign = mission.Campaign;
+            if (campaign.Lunar != null)
+            {
+                var plane = campaign.Slots[0].Elements;
+                var parking = LunarTargeting.ParkingStateAfterAscent(campaign.Site, mission.LiftoffJd, plane.I * MathConst.Rad2Deg, plane.Raan * MathConst.Rad2Deg);
+                var v = campaign.Vehicle;
+                double dvLeft = LaunchPlanner.DeltaVLeftInParkingOrbit(v, campaign.Site, plane.I * MathConst.Rad2Deg, mission.PayloadKg);
+                double stagePropellant = (v.SecondDryKg + mission.PayloadKg) * (math.exp(math.max(dvLeft, 0) / (v.SecondIsp * LaunchVehicle.G0)) - 1);
+                HandOffToLunar(mission, parking, campaign.LunarCraft.IsShip ? 0 : math.clamp(stagePropellant, 0, v.SecondPropKg));
+                _sim.Log($"{mission.Name}: launched from {campaign.Site.ShortName} into its parking orbit (fast-forwarded)");
+                return;
+            }
             double3 normal = TargetPlaneNormal(mission);
             double inclination = math.acos(math.clamp(normal.z, -1, 1)) * MathConst.Rad2Deg;
             double raan = math.atan2(normal.x, -normal.y) * MathConst.Rad2Deg;
@@ -500,13 +713,18 @@ namespace Spaced
             campaign.Deployed += added.Count;
             _sim.RecordLaunch(added.Count, $"{campaign.Class.Name} ({mission.Name})");
 
-            if (raisesOrbit && OrbitMath.FromStateVector(positionKm, velocityKmS, out var stage))
+            if (campaign.Vehicle.Kind == VehicleKind.Starship)
+            {
+                // The Ship closes its payload door and comes home: deorbit burn, reentry, landing at Starbase.
+                if (mission.Flight != null) _sim.Log($"{mission.Name}: Ship deorbit burn — heading home to Starbase");
+            }
+            else if (raisesOrbit && OrbitMath.FromStateVector(positionKm, velocityKmS, out var stage))
             {
                 // The upper stage stays in the transfer orbit as a new rocket body.
                 OrbitMath.Advance(ref stage, 0, catchUp);
                 _sim.Catalog.Add(stage, new ObjectPhysics
                 {
-                    MassKg = (float)Falcon9.SecondDryKg,
+                    MassKg = (float)campaign.Vehicle.SecondDryKg,
                     RadiusM = 6f,
                     BallisticCoeff = 0.01f,
                     Category = ObjectCategory.RocketBody,
@@ -523,6 +741,17 @@ namespace Spaced
         }
 
         uint _pendingSatelliteView;
+
+        /// <summary>The rocket has reached the parking orbit: from here on the Moon mission flies on its own.</summary>
+        void HandOffToLunar(LaunchMission mission, SpaceState parking, double stagePropellantKg)
+        {
+            mission.PayloadDeployed = true;
+            var campaign = mission.Campaign;
+            bool watch = Watched == mission || Director && Watched == null && _lunar.Watched == null;
+            Retire(mission);
+            var lunar = _lunar.Begin(mission.Name, campaign.Lunar.Value, campaign.Vehicle, campaign.LunarCraft, parking, stagePropellantKg, mission.LiftoffJd, watch);
+            lunar.Contract = campaign.Contract;
+        }
 
         void Retire(LaunchMission mission)
         {
@@ -584,7 +813,11 @@ namespace Spaced
                 case 2: ViewSecondStageOnboard(mission); break; // the booster falling away below
 
                 case 3: ViewBooster(mission); break;
-                case 4: if (mission.Droneship != null) ViewDroneship(mission); else ViewBoosterOnboard(mission); break;
+                case 4:
+                    if (mission.Droneship != null) ViewDroneship(mission);
+                    else if (mission.Campaign.Vehicle.ReturnsToSite) ViewTower(mission);
+                    else ViewBoosterOnboard(mission);
+                    break;
                 case 5: ViewChase(mission); break;
                 case 6:
                     if (_pendingSatelliteView != 0)

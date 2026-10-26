@@ -76,10 +76,37 @@ namespace Spaced
             if (nightOverride == null) StartCoroutine(TextureCache.Load(NightTextureUrl, SetNight));
             StartCoroutine(TextureCache.Load(CloudTextureUrl, t =>
             {
-                _surface.SetTexture(CloudTex, t);
-                _clouds.SetTexture(CloudTex, t);
-                Shader.SetGlobalTexture(GlobalCloudTex, t);
+                _staticClouds = t;
+                if (!_liveClouds) ApplyClouds(t, Astro.JdJ2000);
             }));
+        }
+
+        Texture2D _staticClouds, _liveTexture;
+        bool _liveClouds;
+        double _cloudReferenceJd = Astro.JdJ2000;
+
+        /// <summary>Shows a cloud map made from real satellite pictures taken at <paramref name="takenJd"/>.</summary>
+        public void SetClouds(Texture2D texture, double takenJd)
+        {
+            if (_liveTexture != null && _liveTexture != texture) Destroy(_liveTexture);
+            _liveTexture = texture;
+            _liveClouds = true;
+            ApplyClouds(texture, takenJd);
+        }
+
+        /// <summary>Back to the classic (climatological) cloud map, drifting slowly.</summary>
+        public void UseStaticClouds()
+        {
+            _liveClouds = false;
+            if (_staticClouds != null) ApplyClouds(_staticClouds, Astro.JdJ2000);
+        }
+
+        void ApplyClouds(Texture2D t, double referenceJd)
+        {
+            _cloudReferenceJd = referenceJd;
+            _surface.SetTexture(CloudTex, t);
+            _clouds.SetTexture(CloudTex, t);
+            Shader.SetGlobalTexture(GlobalCloudTex, t);
         }
 
         void LateUpdate()
@@ -90,7 +117,8 @@ namespace Spaced
             transform.SetPositionAndRotation(center, Astro.EarthRotation(jd));
             _atmosphere.position = center;
 
-            float drift = (float)((jd - Astro.JdJ2000) * CloudDriftDegPerDay % 360.0);
+            // Real pictures stay put (a few hours either side of when they were taken); the classic map drifts.
+            float drift = (float)((jd - _cloudReferenceJd) * (_liveClouds ? 0 : CloudDriftDegPerDay) % 360.0);
             var cloudRotation = Quaternion.AngleAxis(-drift, Vector3.up);
             _cloudLayer.localRotation = cloudRotation;
             var toClouds = Matrix4x4.Rotate(Quaternion.Inverse(cloudRotation));

@@ -9,7 +9,7 @@ namespace Spaced
     /// Prototype interface (IMGUI): time bar, launch panel, mission control, selected object, simulation stats
     /// and cleanup.
     /// </summary>
-    public sealed class SpacedHud : MonoBehaviour
+    public sealed partial class SpacedHud : MonoBehaviour
     {
         struct ConstellationPreset
         {
@@ -33,6 +33,7 @@ namespace Spaced
         SpaceSimulation _sim;
         CameraRig _rig;
         LaunchManager _launches;
+        LunarMissionManager _lunar;
         SatelliteRenderer _satellites;
         FleetManager _fleet;
         public SpacedAudio Audio;
@@ -58,7 +59,13 @@ namespace Spaced
 
         // Launch parameters
         int _launchMode = 1;
-        int _deployMode;          // 0 = Falcon 9 from a pad, 1 = instant
+        int _deployMode;          // 0 = rocket from a pad, 1 = instant
+        int _vehicleIndex;        // 0 = Falcon 9, 1 = Starship
+        int _destination;         // 0 = Earth orbit, 1 = the Moon
+        int _lunarKind = 2;
+        double _lunarWindowJd = double.NaN, _lunarWindowInclination;
+        int _lunarWindowKey = -1;
+        string _moonName = "Artemis";
         int _siteIndex;
         int _classIndex = 2;
         float _perigee = 550, _apogee = 550, _altitude = 550, _inclination = 53, _raan, _spread;
@@ -83,14 +90,19 @@ namespace Spaced
         float _calloutShownAt = -10f;
         Texture2D _panelTexture;
 
-        public void Init(SpaceSimulation sim, CameraRig rig, LaunchManager launches, SatelliteRenderer satellites, FleetManager fleet)
+        public void Init(SpaceSimulation sim, CameraRig rig, LaunchManager launches, LunarMissionManager lunar, SatelliteRenderer satellites, FleetManager fleet)
         {
             _sim = sim;
+            _lunar = lunar;
             _rig = rig;
             _launches = launches;
             _satellites = satellites;
             _fleet = fleet;
             _fleet.ImageCaptured += image => { _preview = image; };
+            _launches.FlightEvent += (mission, text) =>
+            {
+                if (text.StartsWith("Scrubbed")) AddToast("Launch scrubbed", $"{mission.Name}: {text.Substring(10)}. Next attempt {Astro.ToDateTime(mission.LiftoffJd):MMM d HH:mm} UTC.");
+            };
         }
 
         /// <summary>True when the screen position (pixels, bottom-left origin) is over a HUD panel.</summary>
@@ -124,19 +136,22 @@ namespace Spaced
             if (keyboard.spaceKey.wasPressedThisFrame) clock.Paused = !clock.Paused;
             if (keyboard.periodKey.wasPressedThisFrame || keyboard.equalsKey.wasPressedThisFrame) clock.Faster();
             if (keyboard.commaKey.wasPressedThisFrame || keyboard.minusKey.wasPressedThisFrame) clock.Slower();
-            if (keyboard.rKey.wasPressedThisFrame) clock.Reverse = !clock.Reverse;
-            if (keyboard.nKey.wasPressedThisFrame) clock.JumpTo(System.DateTime.UtcNow);
+            // A career only runs forwards.
+            if (keyboard.rKey.wasPressedThisFrame && !CareerActive) clock.Reverse = !clock.Reverse;
+            if (keyboard.nKey.wasPressedThisFrame && !CareerActive) clock.JumpTo(System.DateTime.UtcNow);
             if (keyboard.fKey.wasPressedThisFrame && _sim.SelectedId != 0) _rig.ViewSatellite(_sim.SelectedId);
             if (keyboard.lKey.wasPressedThisFrame) _rig.LockToEarth = !_rig.LockToEarth;
             if (keyboard.escapeKey.wasPressedThisFrame) BackToEarth();
             if (keyboard.hKey.wasPressedThisFrame || keyboard.f1Key.wasPressedThisFrame) _visible = !_visible;
             if (keyboard.cKey.wasPressedThisFrame) _launches.CinematicMode = !_launches.CinematicMode;
             if (keyboard.mKey.wasPressedThisFrame) _leftTab = _leftTab == 1 ? 0 : 1;
+            if (keyboard.gKey.wasPressedThisFrame) ToggleFreeRoam();
         }
 
         void BackToEarth()
         {
             _launches.StopWatching();
+            _lunar.StopWatching();
             _sim.SelectedId = 0;
             _rig.ViewEarth();
         }
@@ -156,6 +171,11 @@ namespace Spaced
             float width = Screen.width / _scale, height = Screen.height / _scale;
 
             _blockingRects.Clear();
+            if (Session != null && !Session.Started)
+            {
+                DrawMainMenu(width, height);
+                return;
+            }
             var topBar = new Rect(0, 0, width, 34);
             DrawTopBar(topBar);
             _blockingRects.Add(topBar);
@@ -194,6 +214,13 @@ namespace Spaced
                     DrawMapBar(bar);
                     _blockingRects.Add(bar);
                 }
+                else if (_rig.Mode == ViewMode.Free)
+                {
+                    var bar = new Rect(width * 0.5f - 390, height - 62, 780, 56);
+                    DrawBodyLabels();
+                    DrawFreeBar(bar);
+                    _blockingRects.Add(bar);
+                }
 
                 if (_viewer != null)
                 {
@@ -201,6 +228,8 @@ namespace Spaced
                     _blockingRects.Add(viewer);
                 }
             }
+
+            DrawCareerOverlays(width, height);
 
             if (_soundOpen && Audio != null)
             {
@@ -225,22 +254,26 @@ namespace Spaced
             GUILayout.Label("SPACED", _title, GUILayout.Width(80));
             GUILayout.Label(clock.Utc.ToString("yyyy-MM-dd  HH:mm:ss") + " UTC", _header, GUILayout.Width(190));
 
-            clock.Reverse = GUILayout.Toggle(clock.Reverse, "Rev", _button, GUILayout.Width(40));
+            if (!CareerActive) clock.Reverse = GUILayout.Toggle(clock.Reverse, "Rev", _button, GUILayout.Width(40));
             if (GUILayout.Button("−", _button, GUILayout.Width(26))) clock.Slower();
             if (GUILayout.Button(clock.Paused ? "Play" : "Pause", _button, GUILayout.Width(56))) clock.Paused = !clock.Paused;
             if (GUILayout.Button("+", _button, GUILayout.Width(26))) clock.Faster();
             string warp = clock.Paused ? "paused" : SimClock.FormatWarp(clock.Warp) + (clock.WarpLimited ? " (held)" : "");
             GUILayout.Label(warp, clock.WarpLimited ? _accent : _header, GUILayout.Width(110));
-            if (GUILayout.Button("Now", _button, GUILayout.Width(44))) clock.JumpTo(System.DateTime.UtcNow);
+            if (!CareerActive && GUILayout.Button("Now", _button, GUILayout.Width(44))) clock.JumpTo(System.DateTime.UtcNow);
             if (GUILayout.Button("Earth view", _button, GUILayout.Width(80))) BackToEarth();
+            if (GUILayout.Toggle(_rig.Mode == ViewMode.Free, "Free roam", _button, GUILayout.Width(80)) != (_rig.Mode == ViewMode.Free)) ToggleFreeRoam();
             _rig.LockToEarth = GUILayout.Toggle(_rig.LockToEarth, "Lock to Earth", _button, GUILayout.Width(100));
 
+            DrawCareerTopBar();
             GUILayout.FlexibleSpace();
             GUILayout.Label(_rig.Mode == ViewMode.Earth ? "" : "Viewing: " + _rig.TargetLabel, _small);
             GUILayout.Space(10);
             GUILayout.Label(_sim.IsLoaded ? $"{_sim.AliveCount:N0} objects in orbit" : _sim.DataStatus, _header);
             GUILayout.Space(12);
             if (GUILayout.Button(Audio != null && Audio.Muted ? "Sound off" : "Sound", _button, GUILayout.Width(70))) _soundOpen = !_soundOpen;
+            if (Session != null && GUILayout.Button("Save", _button, GUILayout.Width(44))) Session.Save();
+            if (Session != null && GUILayout.Button("Menu", _button, GUILayout.Width(48))) QuitToMenu();
             if (GUILayout.Button("?", _button, GUILayout.Width(26))) _showHelp = !_showHelp;
             GUILayout.EndHorizontal();
             GUILayout.EndArea();
@@ -251,26 +284,34 @@ namespace Spaced
         void DrawLeftPanel(int id)
         {
             GUILayout.BeginHorizontal();
-            _leftTab = GUILayout.Toolbar(_leftTab, new[] { "LAUNCH", $"MY SATELLITES", $"GALLERY ({_fleet.Gallery.Count})" }, _button, GUILayout.Height(22));
+            DrawTabs();
             if (GUILayout.Button(_launchOpen ? "–" : "+", _button, GUILayout.Width(24))) _launchOpen = !_launchOpen;
             GUILayout.EndHorizontal();
             if (!_launchOpen) return;
             GUILayout.Space(4);
             if (_leftTab == 0) DrawLaunchTab();
+            else if (_leftTab == 3) DrawContractsTab();
+            else if (_leftTab == 4) DrawCompanyTab();
             else if (_leftTab == 1) DrawFleetTab();
             else DrawGalleryTab();
         }
 
         void DrawLaunchTab()
         {
+            _destination = GUILayout.Toolbar(_destination, new[] { "Earth orbit", "The Moon" }, _button, GUILayout.Height(24));
+            GUILayout.Space(4);
+            if (_destination == 1)
+            {
+                DrawMoonTab();
+                return;
+            }
 
-            _deployMode = GUILayout.Toolbar(_deployMode, new[] { "Falcon 9 from pad", "Instant (no rocket)" }, _button);
+            if (CareerActive) _deployMode = 0;
+            else _deployMode = GUILayout.Toolbar(_deployMode, new[] { "Rocket from a pad", "Instant (no rocket)" }, _button);
             if (_deployMode == 0)
             {
-                var names = new string[LaunchSite.All.Length];
-                for (int i = 0; i < names.Length; i++) names[i] = LaunchSite.All[i].ShortName;
-                _siteIndex = GUILayout.Toolbar(_siteIndex, names, _button);
-                GUILayout.Label(LaunchSite.All[_siteIndex].Name, _small);
+                _vehicleIndex = GUILayout.Toolbar(_vehicleIndex, new[] { "Falcon 9", "Starship" }, _button);
+                DrawSitePicker(SelectedVehicle);
             }
             GUILayout.Space(4);
             _launchMode = GUILayout.Toolbar(_launchMode, new[] { "Single", "Constellation" }, _button);
@@ -325,17 +366,27 @@ namespace Spaced
             if (_deployMode == 0)
             {
                 var site = LaunchSite.All[_siteIndex];
+                var vehicle = SelectedVehicle;
                 float altitude = _launchMode == 0 ? Mathf.Max(_perigee, _apogee) : _altitude;
-                var plan = LaunchManager.Plan(satClass, site, altitude, _inclination, count);
+                var plan = LaunchManager.Plan(vehicle, satClass, site, altitude, _inclination, count);
                 if (plan.TooHeavy)
-                    GUILayout.Label($"Too heavy: Falcon 9 lifts {plan.CapacityKg / 1000:0.0} t to this orbit. Use Instant.", _warning);
+                    GUILayout.Label($"Too heavy: {vehicle.Name} lifts {plan.CapacityKg / 1000:0.0} t to this orbit.", _warning);
                 else
-                    GUILayout.Label($"Falcon 9: {plan.CapacityKg / 1000:0.0} t to this orbit → {Mathf.Min(plan.PerLaunch, count)} per launch, " +
+                    GUILayout.Label($"{vehicle.Name}: {plan.CapacityKg / 1000:0.0} t to this orbit → {Mathf.Min(plan.PerLaunch, count)} per launch, " +
                                     $"{plan.Launches:N0} launch(es), one every ≥{LaunchManager.PadTurnaroundDays} days", _small);
                 if (_inclination < site.LatitudeDeg - 0.5f)
                     GUILayout.Label($"Below {site.ShortName}'s latitude ({site.LatitudeDeg:0.0}°): reached at the nearest inclination.", _warning);
+                DrawPadWeather(site, vehicle, _sim.Clock.JulianDate);
                 if (_launchMode == 1) _watchAll = GUILayout.Toggle(_watchAll, " Watch every launch (otherwise just the first)");
-                GUI.enabled = !plan.TooHeavy && _sim.IsLoaded;
+                bool affordable = true;
+                if (CareerActive && !plan.TooHeavy)
+                {
+                    double cost = OwnLaunchCost(vehicle, satClass, count, plan.PerLaunch);
+                    affordable = Career.CanAfford(cost) && Career.VehicleAvailable(vehicle);
+                    GUILayout.Label($"Cost: {Prices.Money(cost)} (rockets + {count:N0} × {Prices.Money(Prices.Satellite(satClass))} satellites)", affordable ? _accent : _warning);
+                    if (!Career.VehicleAvailable(vehicle)) GUILayout.Label("Unlock the Starship programme in the COMPANY tab first.", _warning);
+                }
+                GUI.enabled = !plan.TooHeavy && _sim.IsLoaded && affordable;
             }
 
             string action = _deployMode == 0 ? (_launchMode == 0 ? "Schedule launch" : $"Schedule {count:N0} satellites") : (_launchMode == 0 ? "Place satellite" : $"Place {count:N0} satellites");
@@ -355,11 +406,11 @@ namespace Spaced
             GUILayout.Label("CLEANUP", _header);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Deorbit my satellites", _button)) _launchMessage = $"Deorbiting {_launches.DeorbitMine():N0} objects.";
-            if (GUILayout.Button("Remove mine now", _button)) _launchMessage = $"Removed {_launches.RemoveMine():N0} objects.";
+            if (!CareerActive && GUILayout.Button("Remove mine now", _button)) _launchMessage = $"Removed {_launches.RemoveMine():N0} objects.";
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Cancel launches", _button)) _launchMessage = $"Cancelled {_launches.CancelPendingLaunches()} launch(es).";
-            if (GUILayout.Button("Clear new debris", _button)) _launchMessage = $"Cleared {_launches.ClearGeneratedDebris():N0} fragments.";
+            if (!CareerActive && GUILayout.Button("Clear new debris", _button)) _launchMessage = $"Cleared {_launches.ClearGeneratedDebris():N0} fragments.";
             GUILayout.EndHorizontal();
         }
 
@@ -376,6 +427,18 @@ namespace Spaced
             else
                 slots = LaunchService.PlanWalker(_altitude, _inclination, _total, _planes, _phasing, _spread);
 
+            if (CareerActive && _deployMode == 0)
+            {
+                float altitude = _launchMode == 0 ? Mathf.Max(_perigee, _apogee) : _altitude;
+                var plan = LaunchManager.Plan(SelectedVehicle, satClass, LaunchSite.All[_siteIndex], altitude, _inclination, slots.Count);
+                double cost = OwnLaunchCost(SelectedVehicle, satClass, slots, plan.PerLaunch);
+                if (plan.TooHeavy || !Career.TryPay(cost, $"{name}: {slots.Count:N0} × {satClass.Name} on {SelectedVehicle.Name}"))
+                {
+                    _launchMessage = $"Not enough cash: this costs {Prices.Money(cost)}.";
+                    return;
+                }
+            }
+
             var group = _fleet.CreateGroup(name, satClass, (PayloadRole)_roleIndex, _maneuverable);
             if (_deployMode == 1)
             {
@@ -387,16 +450,106 @@ namespace Spaced
                 return;
             }
 
-            var campaign = _launches.StartCampaign(name, satClass, _maneuverable, LaunchSite.All[_siteIndex], slots, _launchMode == 0, _watchAll, group.Id);
+            var campaign = _launches.StartCampaign(name, SelectedVehicle, satClass, _maneuverable, LaunchSite.All[_siteIndex], slots, _launchMode == 0, _watchAll, group.Id);
             if (campaign == null)
             {
-                _launchMessage = "Too heavy for Falcon 9.";
+                _launchMessage = $"Too heavy for {SelectedVehicle.Name}.";
                 return;
             }
             var first = campaign.Missions[0];
             double minutes = (first.LiftoffJd - _sim.Clock.JulianDate) * 1440.0;
             _launchMessage = $"{campaign.Missions.Count} launch(es) scheduled. First liftoff in {FormatDuration(minutes * 60)}" +
                              (_launches.Director ? " — time will slow down so you can watch." : ".");
+        }
+
+        static readonly string[] LunarKindNames = { "Flyby", "Orbit", "Landing" };
+
+        static string LunarKindDescription(LunarMissionKind kind)
+        {
+            switch (kind)
+            {
+                case LunarMissionKind.Flyby: return "Swing around the far side on a free-return path and splash down ~6 days later.";
+                case LunarMissionKind.Orbit: return "Brake into a 100 km orbit around the Moon (~4 days).";
+                default: return "Brake into lunar orbit, then fly a powered descent to a soft landing (~5 days).";
+            }
+        }
+
+        void DrawMoonTab()
+        {
+            _vehicleIndex = GUILayout.Toolbar(_vehicleIndex, new[] { "Falcon 9", "Starship" }, _button);
+            DrawSitePicker(SelectedVehicle);
+            GUILayout.Space(4);
+            _lunarKind = GUILayout.Toolbar(_lunarKind, LunarKindNames, _button);
+            var kind = (LunarMissionKind)_lunarKind;
+            GUILayout.Label(LunarKindDescription(kind), _small);
+
+            var vehicle = SelectedVehicle;
+            var site = LaunchSite.All[_siteIndex];
+            var craft = LunarSpacecraft.For(kind, vehicle.Kind);
+            var rocket = LaunchManager.LunarRocket(vehicle);
+            GUILayout.Space(4);
+            Row("Spacecraft", craft.Name);
+            Row("Mass / Δv", $"{craft.WetKg / 1000:0.0} t  /  {craft.DeltaVMs:N0} m/s");
+            GUILayout.Label(craft.IsShip
+                ? "Starship reaches orbit, is refilled by tanker flights, then flies itself to the Moon."
+                : $"{rocket.Name} (booster expended) puts it in a 250 km parking orbit; the upper stage fires it towards the Moon.", _small);
+
+            // The window only depends on the pad and the clock; recompute when either moves on.
+            double jd = _sim.Clock.JulianDate;
+            int key = _siteIndex;
+            if (key != _lunarWindowKey || double.IsNaN(_lunarWindowJd) || jd > _lunarWindowJd)
+            {
+                _lunarWindowKey = key;
+                _lunarWindowJd = LunarTargeting.LaunchWindow(site, jd + LaunchManager.FirstLaunchLeadMinutes / 1440.0, out _lunarWindowInclination, out _);
+            }
+            Row("Next lunar window", $"{Astro.ToDateTime(_lunarWindowJd):MMM d HH:mm} UTC (in {FormatDuration((_lunarWindowJd - jd) * MathConst.SecondsPerDay)})");
+            Row("Parking orbit", $"250 km at {_lunarWindowInclination:0.0}°");
+            DrawPadWeather(site, rocket, _lunarWindowJd);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Name", _small, GUILayout.Width(40));
+            _moonName = GUILayout.TextField(_moonName, 24);
+            GUILayout.EndHorizontal();
+            double moonCost = Prices.Launch(rocket) + Prices.LunarCraft(craft);
+            bool moonOk = true;
+            if (CareerActive)
+            {
+                moonOk = Career.CanAfford(moonCost) && Career.VehicleAvailable(vehicle);
+                GUILayout.Label($"Cost: {Prices.Money(moonCost)} ({rocket.Name} {Prices.Money(Prices.Launch(rocket))} + spacecraft {Prices.Money(Prices.LunarCraft(craft))})", moonOk ? _accent : _warning);
+                if (!Career.VehicleAvailable(vehicle)) GUILayout.Label("Unlock the Starship programme in the COMPANY tab first.", _warning);
+                GUILayout.Label("No customer: your own Moon programme earns reputation and milestone bonuses. Lunar contracts pay more.", _small);
+            }
+            GUI.enabled = _sim.IsLoaded && moonOk;
+            if (GUILayout.Button($"Schedule Moon {LunarKindNames[_lunarKind].ToLowerInvariant()}", _button, GUILayout.Height(28))
+                && (!CareerActive || Career.TryPay(moonCost, $"Moon {LunarKindNames[_lunarKind].ToLowerInvariant()}: {craft.Name} on {rocket.Name}")))
+            {
+                _launchCounter++;
+                string name = $"{(string.IsNullOrWhiteSpace(_moonName) ? "Artemis" : _moonName.Trim())}-{_launchCounter}";
+                var campaign = _launches.StartLunarCampaign(name, vehicle, site, kind);
+                double seconds = (campaign.Missions[0].LiftoffJd - jd) * MathConst.SecondsPerDay;
+                _launchMessage = $"{name} scheduled: liftoff in {FormatDuration(seconds)}" + (_launches.Director ? " — time will slow down so you can watch." : ".");
+            }
+            GUI.enabled = true;
+            if (_launchMessage.Length > 0) GUILayout.Label(_launchMessage, _small);
+        }
+
+        LaunchVehicle SelectedVehicle => _vehicleIndex == 1 ? LaunchVehicle.Starship : LaunchVehicle.Falcon9;
+
+        /// <summary>Pads that can fly the vehicle, as buttons; keeps the selection on a compatible pad.</summary>
+        void DrawSitePicker(LaunchVehicle vehicle)
+        {
+            bool Usable(LaunchSite s) => s.Supports(vehicle) && (Career == null || Career.SiteAvailable(s) || vehicle.Kind == VehicleKind.Starship);
+            if (!Usable(LaunchSite.All[_siteIndex]))
+                _siteIndex = math.max(0, System.Array.FindIndex(LaunchSite.All, Usable));
+            GUILayout.BeginHorizontal();
+            for (int i = 0; i < LaunchSite.All.Length; i++)
+            {
+                var site = LaunchSite.All[i];
+                if (!Usable(site)) continue;
+                if (GUILayout.Toggle(_siteIndex == i, site.ShortName, _button)) _siteIndex = i;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(LaunchSite.All[_siteIndex].Name, _small);
         }
 
         void ApplyPreset(ConstellationPreset preset)
@@ -541,6 +694,18 @@ namespace Spaced
             double jd = _sim.Clock.JulianDate;
             foreach (var c in _launches.Campaigns)
             {
+                if (c.Lunar != null)
+                {
+                    var lunar = _lunar.Missions.Find(m => m.Name == c.Name);
+                    var pending = c.Missions[0];
+                    string status = lunar != null ? LunarPhaseName(lunar.Phase) + (lunar.Finished ? lunar.Succeeded ? " ✓" : " ✗" : "")
+                        : pending.Flight != null ? "climbing to orbit" : pending.Done ? "lost" : $"liftoff in {FormatDuration((pending.LiftoffJd - jd) * MathConst.SecondsPerDay)}";
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label($"{c.Name}: Moon {LunarKindNames[(int)c.Lunar.Value].ToLowerInvariant()} · {status}", _small);
+                    if (lunar != null && !lunar.Finished && GUILayout.Button("Follow", _button, GUILayout.Width(60))) _lunar.Watch(lunar);
+                    GUILayout.EndHorizontal();
+                    continue;
+                }
                 int done = c.Missions.FindAll(m => m.Done).Count;
                 var next = c.Missions.Find(m => !m.Done && m.Flight == null && m.Scheduled);
                 string when = next == null ? "" : $" · next in {FormatDuration((next.LiftoffJd - jd) * MathConst.SecondsPerDay)}";
@@ -688,6 +853,8 @@ namespace Spaced
             GUILayout.EndHorizontal();
             if (_rig.CameraAltitudeKm < 20000)
                 GUILayout.Label(ImageryMosaic.Attribution + " · " + TileDownloads.TerrainAttribution + " · " + TileDownloads.NightAttribution, _small);
+            else if (Weather != null)
+                GUILayout.Label((Weather.LiveClouds ? WeatherService.CloudAttribution + $" · {Weather.CloudTimeUtc:d MMM HH:mm} UTC" : "Clouds: classic map") + " · " + WeatherService.ForecastAttribution, _small);
             GUILayout.EndArea();
         }
 
@@ -746,7 +913,12 @@ namespace Spaced
 
         // ───────────────────────────── Mission control ─────────────────────────────
 
-        bool HasMissionContent() => _launches.NextLaunch() != null || _launches.Watched != null || HasActive();
+        bool HasMissionContent()
+        {
+            if (_launches.NextLaunch() != null || _launches.Watched != null || HasActive() || _lunar.Watched != null) return true;
+            foreach (var _ in _lunar.Active()) return true;
+            return false;
+        }
 
         bool HasActive()
         {
@@ -772,6 +944,13 @@ namespace Spaced
                 if (Cinematic.Active) DrawCameraButtons(mission);
                 else DrawTelemetry(mission);
             }
+            else
+            {
+                var lunar = _lunar.Watched;
+                if (lunar == null)
+                    foreach (var active in _lunar.Active()) { lunar = active; break; }
+                if (lunar != null) DrawLunarTelemetry(lunar);
+            }
 
             var next = _launches.NextLaunch();
             if (next != null)
@@ -784,11 +963,92 @@ namespace Spaced
                 if (GUILayout.Button("Skip to T-1 min", _button, GUILayout.Width(110)))
                     _sim.Clock.JumpTo(Astro.ToDateTime(next.LiftoffJd - 65.0 / MathConst.SecondsPerDay));
                 GUILayout.EndHorizontal();
+                var w = _launches.WeatherFor(next);
+                if (w.Known)
+                    GUILayout.Label((w.Go ? "<color=#9fe39f>WEATHER GO</color>" : $"<color=#ff6a5a>WEATHER NO-GO: {w.Reason}</color>") + $" · {w.Summary}", _small);
             }
+            if (Weather != null) Weather.ScrubsEnabled = GUILayout.Toggle(Weather.ScrubsEnabled, " Real weather: bad forecasts scrub launches");
 
             _launches.Director = GUILayout.Toggle(_launches.Director, " Director: slow time and pick camera shots during launches");
             _launches.CinematicMode = GUILayout.Toggle(_launches.CinematicMode, " Cinematic (C): hide satellites and panels, light the rocket");
-            if (_launches.Watched != null && GUILayout.Button("Stop watching", _button)) BackToEarth();
+            if ((_launches.Watched != null || _lunar.Watched != null) && GUILayout.Button("Stop watching", _button)) BackToEarth();
+        }
+
+        static string LunarPhaseName(LunarPhase phase)
+        {
+            switch (phase)
+            {
+                case LunarPhase.ParkingOrbit: return "Parking orbit";
+                case LunarPhase.TransLunarInjection: return "Trans-lunar injection";
+                case LunarPhase.Coast: return "Coasting to the Moon";
+                case LunarPhase.CorrectionBurn: return "Course correction";
+                case LunarPhase.OrbitInsertion: return "Lunar orbit insertion";
+                case LunarPhase.LunarOrbit: return "In lunar orbit";
+                case LunarPhase.Deorbit: return "Deorbit burn";
+                case LunarPhase.DescentCoast: return "Descent coast";
+                case LunarPhase.PoweredDescent: return "Powered descent";
+                case LunarPhase.Landed: return "Landed";
+                case LunarPhase.Returning: return "Returning to Earth";
+                case LunarPhase.Splashdown: return "Splashdown";
+                default: return "Lost";
+            }
+        }
+
+        static string FormatMet(double seconds)
+        {
+            seconds = math.max(0, seconds);
+            int days = (int)(seconds / MathConst.SecondsPerDay);
+            double rest = seconds - days * MathConst.SecondsPerDay;
+            return $"{days}d {(int)(rest / 3600):00}:{(int)(rest / 60) % 60:00}:{(int)rest % 60:00}";
+        }
+
+        static string FormatAltitude(double km) => km < 100 ? $"{km * 1000:N0} m" : $"{km:N0} km";
+
+        void DrawLunarTelemetry(LunarMission m)
+        {
+            double jd = _sim.Clock.JulianDate;
+            GUILayout.Label($"{m.Name}   <b>MET {FormatMet(m.MissionDays * MathConst.SecondsPerDay)}</b>   {LunarPhaseName(m.Phase)}", _header);
+            bool nearMoon = m.MoonAltitudeKm < m.EarthAltitudeKm;
+            Cislunar.Moon(m.State.Jd, out _, out double3 moonVelocity);
+            double speed = nearMoon ? math.length(m.State.V - moonVelocity) : m.SpeedKmS;
+            Row("Altitude above the Moon", FormatAltitude(m.MoonAltitudeKm));
+            Row("Altitude above the Earth", FormatAltitude(m.EarthAltitudeKm));
+            Row(nearMoon ? "Speed (relative to the Moon)" : "Speed", speed < 1 ? $"{speed * 1000:N0} m/s" : $"{speed:0.000} km/s");
+            if (m.StageAttached) Bar("Upper stage propellant", m.StagePropellantKg, m.Vehicle.SecondPropKg);
+            Bar(m.Craft.IsShip ? "Ship propellant" : "Spacecraft propellant", m.Craft.PropellantKg, LunarSpacecraft.For(m.Kind, m.Vehicle.Kind).PropellantKg);
+            Row("Δv used", $"{m.DeltaVUsedMs:N0} m/s");
+            if (m.Phase == LunarPhase.Landed)
+                Row("Landed at", $"{math.abs(m.LandedLatDeg):0.00}°{(m.LandedLatDeg >= 0 ? "N" : "S")} {math.abs(m.LandedLonDeg):0.00}°{(m.LandedLonDeg >= 0 ? "E" : "W")} · {m.TouchdownSpeed:0.0} m/s");
+
+            if (!m.Finished && !double.IsNaN(m.NextEventJd) && m.NextEventJd > jd)
+            {
+                double seconds = (m.NextEventJd - jd) * MathConst.SecondsPerDay;
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"Next: {m.NextEventName} in {FormatDuration(seconds)}", _accent);
+                GUILayout.FlexibleSpace();
+                if (seconds > 90 && GUILayout.Button("Skip to it", _button, GUILayout.Width(80)))
+                    _sim.Clock.JumpTo(Astro.ToDateTime(m.NextEventJd - 30.0 / MathConst.SecondsPerDay));
+                GUILayout.EndHorizontal();
+            }
+
+            int from = Mathf.Max(0, m.Events.Count - 4);
+            for (int i = from; i < m.Events.Count; i++)
+            {
+                var e = m.Events[i];
+                GUILayout.Label($"<color=#7f8fa6>{FormatMet(e.MissionTime)}</color>  {e.Text}", _small);
+            }
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Spacecraft", _button)) { _lunar.Watch(m); _lunar.Director = false; _lunar.ViewCraft(m); }
+            if (GUILayout.Button("Trajectory", _button)) { _lunar.Watch(m); _lunar.Director = false; _lunar.ViewTrajectory(m); }
+            if (GUILayout.Button("Over the Moon", _button)) { _lunar.Watch(m); _lunar.Director = false; _lunar.ViewOverMoon(m); }
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (_lunar.Watched != m && !m.Finished && GUILayout.Button("Follow", _button)) _lunar.Watch(m);
+            if (_lunar.Watched == m) _lunar.Director = GUILayout.Toggle(_lunar.Director, " Director: slow time for burns, pick shots");
+            if (m.Finished && GUILayout.Button("Dismiss", _button)) _lunar.Dismiss(m);
+            GUILayout.EndHorizontal();
+            _lunar.HideSatellites = GUILayout.Toggle(_lunar.HideSatellites, " Hide Earth-orbit satellites during Moon missions (lighter on the PC)");
         }
 
         void DrawTelemetry(LaunchMission mission)
@@ -809,8 +1069,9 @@ namespace Spaced
                 flight.OrbitShape(out double peri, out double apo);
                 Row("Orbit", peri < 0 ? "suborbital" : $"{peri:N0} × {apo:N0} km");
             }
-            Bar("Stage 1 propellant", flight.Booster?.PropellantKg ?? flight.BoosterPropellantKg, Falcon9.BoosterPropKg);
-            Bar("Stage 2 propellant", flight.SecondPropellantKg, Falcon9.SecondPropKg);
+            bool starship = flight.Vehicle.Kind == VehicleKind.Starship;
+            Bar(starship ? "Super Heavy propellant" : "Stage 1 propellant", flight.Booster?.PropellantKg ?? flight.BoosterPropellantKg, flight.Vehicle.BoosterPropKg);
+            Bar(starship ? "Ship propellant" : "Stage 2 propellant", flight.SecondPropellantKg, flight.Vehicle.SecondPropKg);
             if (booster != null)
                 Row("Booster", $"{BoosterStatus(booster.Phase)} · {booster.AltitudeM / 1000:0.0} km · {math.length(booster.AirVelocity) * 3.6:N0} km/h");
 
@@ -833,12 +1094,19 @@ namespace Spaced
             if (GUILayout.Button("Chase", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewChase(mission); }
             GUI.enabled = booster != null || flight.BoosterAttached;
             if (GUILayout.Button("Booster", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewBooster(mission); }
-            GUI.enabled = mission.Droneship != null;
-            if (GUILayout.Button("Droneship", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewDroneship(mission); }
-            GUI.enabled = true;
+            if (flight.Vehicle.ReturnsToSite)
+            {
+                if (GUILayout.Button("Tower", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewTower(mission); }
+            }
+            else
+            {
+                GUI.enabled = mission.Droneship != null;
+                if (GUILayout.Button("Droneship", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewDroneship(mission); }
+                GUI.enabled = true;
+            }
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Stage 2 onboard", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewSecondStageOnboard(mission); }
+            if (GUILayout.Button(flight.Vehicle.Kind == VehicleKind.Starship ? "Ship onboard" : "Stage 2 onboard", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewSecondStageOnboard(mission); }
             GUI.enabled = booster != null || flight.BoosterAttached;
             if (GUILayout.Button("Booster onboard", _button)) { _launches.Watch(mission); _launches.Director = false; _launches.ViewBoosterOnboard(mission); }
             GUI.enabled = true;
@@ -872,9 +1140,10 @@ namespace Spaced
 
             double3 s1Velocity = booster != null ? booster.AirVelocity : flight.AirVelocity;
             double s1Altitude = booster != null ? booster.AltitudeM / 1000.0 : flight.AltitudeKm;
-            Gauge(new Rect(40, height - 112, 260, 100), "STAGE 1", math.length(s1Velocity) * 3.6, s1Altitude,
-                booster == null ? "" : booster.Phase == BoosterPhase.Landed ? "LANDED" : booster.Phase == BoosterPhase.Lost ? "LOST" : BoosterStatus(booster.Phase).ToUpperInvariant());
-            Gauge(new Rect(width - 300, height - 112, 260, 100), "STAGE 2", math.length(flight.AirVelocity) * 3.6, flight.AltitudeKm,
+            bool starship = flight.Vehicle.Kind == VehicleKind.Starship;
+            Gauge(new Rect(40, height - 112, 260, 100), starship ? "SUPER HEAVY" : "STAGE 1", math.length(s1Velocity) * 3.6, s1Altitude,
+                booster == null ? "" : booster.Phase == BoosterPhase.Landed ? (booster.Caught ? "CAUGHT" : "LANDED") : booster.Phase == BoosterPhase.Lost ? "LOST" : BoosterStatus(booster.Phase).ToUpperInvariant());
+            Gauge(new Rect(width - 300, height - 112, 260, 100), starship ? "SHIP" : "STAGE 2", math.length(flight.AirVelocity) * 3.6, flight.AltitudeKm,
                 flight.BoosterAttached ? "" : PhaseName(flight.Phase).ToUpperInvariant());
 
             DrawTimeline(new Rect(width * 0.5f - 330, height - 40, 660, 30), flight);
@@ -946,6 +1215,11 @@ namespace Spaced
             if (e.StartsWith("Max-Q")) return "MAX-Q";
             if (e.StartsWith("Main engine")) return "MECO";
             if (e.StartsWith("Stage separation")) return "STAGE SEPARATION";
+            if (e.StartsWith("Hot staging")) return "HOT STAGING";
+            if (e.StartsWith("Ship engine start")) return "SHIP IGNITION";
+            if (e.StartsWith("Boostback burn startup")) return "BOOSTBACK BURN";
+            if (e.StartsWith("Booster caught")) return "BOOSTER CAUGHT!";
+            if (e.StartsWith("Booster lost: missed")) return "BOOSTER LOST";
             if (e.Contains("SES-1")) return "SECOND STAGE IGNITION";
             if (e.StartsWith("Fairing")) return "FAIRING SEPARATION";
             if (e.StartsWith("Entry burn startup")) return "ENTRY BURN";
@@ -979,6 +1253,7 @@ namespace Spaced
             switch (phase)
             {
                 case BoosterPhase.Coasting: return "flip & coast";
+                case BoosterPhase.Boostback: return "boostback burn";
                 case BoosterPhase.EntryBurn: return "entry burn";
                 case BoosterPhase.Descent: return "aerodynamic descent";
                 case BoosterPhase.LandingBurn: return "landing burn";
@@ -1128,15 +1403,28 @@ namespace Spaced
                 "Close-ups: drag — orbit · scroll — zoom (ground cameras: lens zoom)\n" +
                 "Click an object — select it · F — view it up close\n" +
                 "Esc — back to the Earth view\n" +
-                "Space — pause   ·   + / − — time warp   ·   R — reverse\n" +
-                "N — jump to now   ·   L — lock camera to Earth\n" +
+                "Space — pause   ·   + / − — time warp   ·   R — reverse (sandbox)\n" +
+                "N — jump to now (sandbox)   ·   L — lock camera to Earth\n" +
                 "M — My satellites   ·   C — cinematic launches\n" +
+                "G — free roam: fly anywhere with WASD, Q/E down/up, Shift faster; drag to look around, scroll to zoom\n" +
                 "H — hide interface", _label);
             GUILayout.Space(6);
             GUILayout.Label(
                 "Real objects come from CelesTrak (cached for 2 hours). Launches are flown physically: Falcon 9 gravity " +
                 "turn, closed-loop second stage guidance, and a hoverslam landing on a droneship parked where the " +
                 "booster will come down. Launch windows open when the pad passes under each target orbit plane.", _small);
+            GUILayout.Space(6);
+            GUILayout.Label("CAREER", _title);
+            GUILayout.Label(
+                "Take contracts from the board (CONTRACTS), book the launches and get paid when the satellites reach orbit. " +
+                "Your own satellites earn money too: Comms and Navigation satellites for the ground they cover, Imaging ones " +
+                "for every picture. Bills arrive monthly; stay below zero for 45 days and the company folds. Reputation brings " +
+                "bigger contracts, new pads and Starship (COMPANY), and the Moon pays best of all.", _small);
+            GUILayout.Space(6);
+            GUILayout.Label(
+                "The Moon tab flies real trajectories: trans-lunar injection, course corrections, free-return flybys, lunar orbit " +
+                "insertion and a powered descent. Clouds are today's satellite pictures; every pad has a live forecast, and gusts, " +
+                "lightning, heavy rain or rough seas at the droneship scrub the launch. The game saves itself every few minutes.", _small);
             if (GUILayout.Button("Close", _button)) _showHelp = false;
         }
 

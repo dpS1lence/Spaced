@@ -71,14 +71,20 @@ namespace Spaced
         }
     }
 
-    /// <summary>A SpaceX launch complex: pad, towers, propellant farm, surrounding land and sea, liftoff steam.</summary>
+    /// <summary>
+    /// A SpaceX launch complex: pad, towers, propellant farm, surrounding land and sea, liftoff steam. At Starbase,
+    /// the orbital launch mount and the catch tower, whose arms ride up and down and close around a returning
+    /// Super Heavy.
+    /// </summary>
     public sealed class LaunchSiteView : EarthFixedView
     {
         public LaunchSite Site { get; private set; }
         Material _groundMaterial;
         bool _imageryRequested;
         Transform _strongback;
-        ParticleSystem _steam;
+        Transform _carriage, _armLeft, _armRight;
+        readonly System.Collections.Generic.List<ParticleSystem> _steam = new System.Collections.Generic.List<ParticleSystem>();
+        float _armHeight = 100f, _armHeightTarget = 100f, _armClosed, _armClosedTarget;
 
         public void Init(LaunchSite site, CameraRig rig, MaterialLibrary materials, Shader groundShader, Fx fx)
         {
@@ -86,29 +92,93 @@ namespace Spaced
             Rig = rig;
             EcefKm = Astro.GeoToEcef(site.LatitudeDeg, site.LongitudeDeg, 0);
             CreateFrame(site.ShortName);
+            bool starbase = site.Style == PadStyle.Starbase;
+            float ground = starbase ? 0f : SiteModels.GroundLevel;
 
-            _groundMaterial = AddGround(Content.transform, groundShader, 9000f, site.ShorelineOffsetM, false, SiteModels.GroundLevel - 0.6f)
+            _groundMaterial = AddGround(Content.transform, groundShader, 9000f, site.ShorelineOffsetM, false, ground - 0.6f)
                 .GetComponent<MeshRenderer>().sharedMaterial;
-            AddMesh(Content.transform, SiteModels.Pad(site.Style), materials, "Pad");
-            _strongback = new GameObject("Strongback Hinge").transform;
-            _strongback.SetParent(Content.transform, false);
-            _strongback.localPosition = new Vector3(0, SiteModels.GroundLevel + 1f, -4.8f);
-            var arm = AddMesh(_strongback, SiteModels.Strongback(), materials, "Strongback");
-            arm.transform.localPosition = new Vector3(0, -SiteModels.GroundLevel - 1f, 4.8f) + new Vector3(0, SiteModels.GroundLevel, 0);
+            if (starbase)
+            {
+                AddMesh(Content.transform, SiteModels.StarbasePad(), materials, "Pad");
+                BuildArms(materials);
+                // Deluge steam blasts out sideways from under the launch mount.
+                foreach (float heading in new[] { 90f, 270f, 0f })
+                {
+                    var vent = new GameObject("Deluge").transform;
+                    vent.SetParent(Content.transform, false);
+                    vent.localPosition = new Vector3(0, 3f, 0);
+                    vent.localRotation = Quaternion.Euler(0, heading, 0) * Quaternion.Euler(-85f, 0, 0);
+                    _steam.Add(fx.CreateSmoke(vent, Frame, fx.Smoke, 18f, 40f, 75f, 1800, new Color(0.95f, 0.95f, 0.95f, 1f), 7f));
+                }
+            }
+            else
+            {
+                AddMesh(Content.transform, SiteModels.Pad(site.Style), materials, "Pad");
+                _strongback = new GameObject("Strongback Hinge").transform;
+                _strongback.SetParent(Content.transform, false);
+                _strongback.localPosition = new Vector3(0, SiteModels.GroundLevel + 1f, -4.8f);
+                var arm = AddMesh(_strongback, SiteModels.Strongback(), materials, "Strongback");
+                arm.transform.localPosition = new Vector3(0, -SiteModels.GroundLevel - 1f, 4.8f) + new Vector3(0, SiteModels.GroundLevel, 0);
 
-            // Steam and smoke billow out of the flame trench at liftoff.
-            var trench = new GameObject("Flame Trench").transform;
-            trench.SetParent(Content.transform, false);
-            trench.localPosition = new Vector3(0, SiteModels.GroundLevel + 2f, 50f);
-            trench.localRotation = Quaternion.Euler(0, site.FlameTrenchHeadingDeg, 0) * Quaternion.Euler(-80f, 0, 0);
-            _steam = fx.CreateSmoke(trench, Frame, fx.Smoke, 18f, 45f, 70f, 2500, new Color(0.95f, 0.95f, 0.95f, 1f), 9f);
+                // Steam and smoke billow out of the flame trench at liftoff.
+                var trench = new GameObject("Flame Trench").transform;
+                trench.SetParent(Content.transform, false);
+                trench.localPosition = new Vector3(0, SiteModels.GroundLevel + 2f, 50f);
+                trench.localRotation = Quaternion.Euler(0, site.FlameTrenchHeadingDeg, 0) * Quaternion.Euler(-80f, 0, 0);
+                _steam.Add(fx.CreateSmoke(trench, Frame, fx.Smoke, 18f, 45f, 70f, 2500, new Color(0.95f, 0.95f, 0.95f, 1f), 9f));
+            }
             Fx.SetLayer(gameObject);
+        }
+
+        void BuildArms(MaterialLibrary materials)
+        {
+            Vector3 toMount = (-SiteModels.StarbaseTower).normalized;
+            _carriage = new GameObject("Arm Carriage").transform;
+            _carriage.SetParent(Content.transform, false);
+            _carriage.localRotation = Quaternion.LookRotation(toMount);
+            AddMesh(_carriage, SiteModels.ArmCarriage(), materials, "Carriage");
+            foreach (float side in new[] { -1f, 1f })
+            {
+                var hinge = new GameObject(side < 0 ? "Left Arm" : "Right Arm").transform;
+                hinge.SetParent(_carriage, false);
+                hinge.localPosition = new Vector3(side * SiteModels.ArmSpacing, 0, 1.6f);
+                AddMesh(hinge, SiteModels.Arm(), materials, "Arm");
+                if (side < 0) _armLeft = hinge; else _armRight = hinge;
+            }
+            PlaceArms();
+        }
+
+        void PlaceArms()
+        {
+            if (_carriage == null) return;
+            Vector3 toMount = (-SiteModels.StarbaseTower).normalized;
+            _carriage.localPosition = SiteModels.StarbaseTower + toMount * 5.6f + Vector3.up * _armHeight;
+            float open = Mathf.Lerp(38f, 0f, _armClosed);
+            _armLeft.localRotation = Quaternion.Euler(0, -open, 0);
+            _armRight.localRotation = Quaternion.Euler(0, open, 0);
+        }
+
+        /// <summary>
+        /// Moves the arms: <paramref name="heightM"/> above the ground, <paramref name="closed"/> 0 = open wide,
+        /// 1 = closed around the booster. They travel at a few metres per second.
+        /// </summary>
+        public void SetArms(float heightM, float closed)
+        {
+            _armHeightTarget = heightM;
+            _armClosedTarget = Mathf.Clamp01(closed);
         }
 
         protected override void LateUpdate()
         {
             base.LateUpdate();
             if (Content == null || _groundMaterial == null) return;
+            if (_carriage != null)
+            {
+                float dt = Time.deltaTime;
+                _armHeight = Mathf.MoveTowards(_armHeight, _armHeightTarget, 6f * dt);
+                _armClosed = Mathf.MoveTowards(_armClosed, _armClosedTarget, 0.35f * dt);
+                PlaceArms();
+            }
             // Fetch the real ~10 m imagery of the complex the first time anyone looks at it (≈80 small tiles, cached).
             if (!_imageryRequested && Content.activeSelf)
             {
@@ -123,10 +193,15 @@ namespace Spaced
         }
 
         /// <summary>0 = strongback against the rocket, 1 = fully retracted (tilted ~2° away, as before launch).</summary>
-        public void SetStrongback(float retracted) =>
-            _strongback.localRotation = Quaternion.Euler(-2.2f * Mathf.Clamp01(retracted), 0, 0);
+        public void SetStrongback(float retracted)
+        {
+            if (_strongback != null) _strongback.localRotation = Quaternion.Euler(-2.2f * Mathf.Clamp01(retracted), 0, 0);
+        }
 
-        public void Steam(float rate, double warp) => Fx.Drive(_steam, rate, warp);
+        public void Steam(float rate, double warp)
+        {
+            foreach (var steam in _steam) Fx.Drive(steam, rate, warp);
+        }
     }
 
     /// <summary>The droneship waiting downrange, on its patch of ocean.</summary>

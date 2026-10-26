@@ -60,6 +60,88 @@ namespace Spaced
             return b.Build($"Pad {style}");
         }
 
+        // ── Starbase ── frame origin on the ground; the rocket stands on the mount, MountTop above it.
+        public const float StarbaseMountTop = 20f;
+        /// <summary>Catch tower centre relative to the mount (north-west of it), and its height.</summary>
+        public static readonly Vector3 StarbaseTower = new Vector3(-19f, 0f, 19f);
+        public const float StarbaseTowerHeight = 146f;
+        public const float ArmLength = 36f;
+        /// <summary>Half the spacing of the two arms: they close either side of the 9 m booster.</summary>
+        public const float ArmSpacing = 5.6f;
+
+        /// <summary>
+        /// Starbase Orbital Launch Pad A: the 20 m orbital launch mount on six legs over a steel flame deflector,
+        /// the 146 m catch tower (arms are separate, moving parts), the tank farm and the hardstand.
+        /// </summary>
+        public static SurfaceMesh StarbasePad()
+        {
+            var b = new MeshBuilder();
+            float top = StarbaseMountTop;
+            b.Box(new Vector3(0, -0.5f, 0), new Vector3(220f, 1f, 220f), Surface.Concrete, 16f);
+            b.Cylinder(new Vector3(0, 0f, 0), new Vector3(0, 0.6f, 0), 8f, 7.5f, 40, Surface.Steel); // water-cooled deflector
+            for (int i = 0; i < 6; i++)
+            {
+                float a = (i / 6f + 1f / 12f) * Mathf.PI * 2f;
+                b.Box(new Vector3(Mathf.Cos(a) * 9f, (top - 2.5f) * 0.5f, Mathf.Sin(a) * 9f), new Vector3(3f, top - 2.5f, 3f), Surface.Concrete, 4f);
+            }
+            // Launch table: a steel ring around the 9 m opening.
+            b.Lathe(Vector3.zero, Vector3.up, new[] { new Vector2(top - 2.5f, 10.5f), new Vector2(top, 10.5f) }, 48, Surface.Steel);
+            b.Lathe(Vector3.zero, Vector3.up, new[] { new Vector2(top, 4.9f), new Vector2(top - 2.5f, 4.9f) }, 48, Surface.Steel);
+            b.Lathe(new Vector3(0, top, 0), Vector3.up, new[] { new Vector2(0, 10.5f), new Vector2(0, 4.9f) }, 48, Surface.Steel);
+            b.Lathe(new Vector3(0, top - 2.5f, 0), Vector3.up, new[] { new Vector2(0, 4.9f), new Vector2(0, 10.5f) }, 48, Surface.Steel);
+            for (int i = 0; i < 20; i++)
+            {
+                float a = i / 20f * Mathf.PI * 2f;
+                var dir = new Vector3(Mathf.Cos(a), 0, Mathf.Sin(a));
+                b.Box(dir * 5.6f + Vector3.up * (top + 0.4f), new Vector3(0.9f, 0.8f, 0.6f), Quaternion.LookRotation(dir), Surface.Steel); // hold-down clamps
+            }
+
+            // Catch tower: stacked lattice sections, the carriage rails on the face towards the mount.
+            LatticeTower(b, StarbaseTower, 10f, StarbaseTowerHeight, 26);
+            Vector3 toMount = (-StarbaseTower).normalized;
+            Vector3 side = Vector3.Cross(Vector3.up, toMount).normalized;
+            foreach (float s in new[] { -1f, 1f })
+                b.Box(StarbaseTower + toMount * 5.3f + side * s * 3.2f + Vector3.up * StarbaseTowerHeight * 0.5f,
+                    new Vector3(0.6f, StarbaseTowerHeight, 0.6f), Quaternion.LookRotation(toMount), Surface.Steel);
+            b.Box(StarbaseTower + Vector3.up * (StarbaseTowerHeight + 2f), new Vector3(11f, 4f, 11f), Surface.Steel); // crane top
+            Light(b, StarbaseTower + Vector3.up * (StarbaseTowerHeight + 4.5f));
+
+            // Tank farm (methane and oxygen), with its shroud walls, and the deluge water tanks.
+            for (int i = 0; i < 8; i++)
+            {
+                var c = new Vector3(95f + (i % 4) * 11f, 0, -55f - (i / 4) * 11f);
+                b.Cylinder(c, c + Vector3.up * 32f, 4.6f, 4.6f, 24, i % 2 == 0 ? Surface.Stainless : Surface.WhitePaint);
+            }
+            for (int i = 0; i < 3; i++)
+            {
+                var c = new Vector3(-90f + i * 12f, 0, -70f);
+                b.Cylinder(c, c + Vector3.up * 18f, 5f, 5f, 24, Surface.Stainless);
+            }
+            b.Box(new Vector3(-120f, 3f, 40f), new Vector3(30f, 6f, 14f), Surface.Radiator, 4f);
+            return b.Build("Starbase Pad");
+        }
+
+        /// <summary>The chopstick carriage that rides up and down the tower; origin on the tower face.</summary>
+        public static SurfaceMesh ArmCarriage()
+        {
+            var b = new MeshBuilder();
+            b.Box(new Vector3(0, 0, 0.8f), new Vector3(ArmSpacing * 2f + 2f, 6f, 1.6f), Surface.Steel);
+            b.Box(new Vector3(0, 3.2f, 0.8f), new Vector3(ArmSpacing * 2f + 2f, 0.5f, 2.4f), Surface.Steel);
+            return b.Build("Arm Carriage");
+        }
+
+        /// <summary>One chopstick arm: hinge at the origin, reaching along +Z, with the rail the booster rests on.</summary>
+        public static SurfaceMesh Arm()
+        {
+            var b = new MeshBuilder();
+            b.Box(new Vector3(0, 0, ArmLength * 0.5f), new Vector3(1.4f, 2.6f, ArmLength), Surface.Steel);
+            b.Box(new Vector3(0, 1.45f, ArmLength * 0.5f + 4f), new Vector3(0.9f, 0.3f, ArmLength - 8f), Surface.Aluminium);
+            for (float z = 2f; z < ArmLength; z += 3f)
+                b.Box(new Vector3(0, -1.4f, z), new Vector3(1.2f, 0.25f, 0.25f), Surface.Steel);
+            b.Cylinder(new Vector3(0, -2.2f, 0), new Vector3(0, 2.2f, 0), 0.9f, 0.9f, 12, Surface.Steel); // hinge
+            return b.Build("Chopstick Arm");
+        }
+
         /// <summary>
         /// Transporter-erector ("strongback"): lattice columns with clamp arms, pivoting at its base on the
         /// south side of the rocket. Built in its own frame with the hinge at the origin.
@@ -106,12 +188,16 @@ namespace Spaced
         }
 
         /// <summary>Ground disc that follows the Earth's curvature, for the ground or ocean shader (one submesh).</summary>
-        public static Mesh GroundDisc(float radius, int rings, int segments, float yOffset)
+        public static Mesh GroundDisc(float radius, int rings, int segments, float yOffset) =>
+            GroundDisc(radius, rings, segments, yOffset, (float)(EarthConstants.RadiusKm * 1000.0));
+
+        /// <summary>Ground disc following a planet of the given radius (metres); UVs are metres east/north.</summary>
+        public static Mesh GroundDisc(float radius, int rings, int segments, float yOffset, float planetRadius)
         {
             var vertices = new Vector3[(rings + 1) * segments + 1];
             var uvs = new Vector2[vertices.Length];
             var normals = new Vector3[vertices.Length];
-            float earthRadius = (float)(EarthConstants.RadiusKm * 1000.0);
+            float earthRadius = planetRadius;
             vertices[0] = new Vector3(0, yOffset, 0);
             normals[0] = Vector3.up;
             for (int r = 0; r <= rings; r++)

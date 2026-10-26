@@ -43,7 +43,7 @@ namespace Spaced
         void LateUpdate()
         {
             if (_sim == null || _line == null) return;
-            int index = Cinematic.Active ? -1 : _sim.SelectedIndex;
+            int index = Cinematic.Active || Cinematic.SatellitesHidden ? -1 : _sim.SelectedIndex;
             _line.enabled = index >= 0;
             if (index < 0) return;
 

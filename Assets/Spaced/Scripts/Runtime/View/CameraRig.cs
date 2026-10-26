@@ -19,6 +19,15 @@ namespace Spaced
         GroundTracking,
         /// <summary>A camera bolted to the vehicle, like the onboard views on SpaceX webcasts.</summary>
         Onboard,
+        /// <summary>Fly anywhere between the Earth and the Moon: orbit and zoom around a point you move yourself.</summary>
+        Free,
+    }
+
+    /// <summary>The body a free-roaming camera moves with (so the Moon doesn't run away at high time warp).</summary>
+    public enum FreeAnchor
+    {
+        Earth,
+        Moon,
     }
 
     /// <summary>Where an onboard camera is and where it looks (inertial frame, km for position).</summary>
@@ -82,6 +91,8 @@ namespace Spaced
         double _orbitDistanceTarget = -1;
 
         const double MinGlobeDistanceM = 150;
+        /// <summary>Close-up cameras can pull back far enough to frame the Earth and the Moon together.</summary>
+        const double MaxOrbitDistanceM = 2e9;
         const double MaxGlobeDistanceM = 1.6e8;
 
         static readonly int SunDir = Shader.PropertyToID("_SpacedSunDir");
@@ -95,6 +106,8 @@ namespace Spaced
         static readonly int CamAtmosphereCFar = Shader.PropertyToID("_SpacedCamAtmosphereCFar");
         static readonly int MoonDir = Shader.PropertyToID("_SpacedMoonDir");
         static readonly int MoonLight = Shader.PropertyToID("_SpacedMoonLight");
+        static readonly int MoonCenterLocal = Shader.PropertyToID("_SpacedMoonCenterLocal");
+        static readonly int MoonRadiusLocal = Shader.PropertyToID("_SpacedMoonRadiusLocal");
         static readonly int WorldToEarth = Shader.PropertyToID("_SpacedWorldToEarth");
         static readonly int MagneticAxis = Shader.PropertyToID("_SpacedMagneticAxis");
         static readonly int AuroraActivity = Shader.PropertyToID("_SpacedAuroraActivity");
@@ -117,6 +130,12 @@ namespace Spaced
 
         uint _satelliteId;
         Func<double3?> _vehicle;
+        FreeAnchor _freeAnchor;
+        double3 _freeOffsetKm;
+        float _transitionSeconds = 1.4f;
+        /// <summary>Free roam: the body the camera point moves with, and how fast it flies (km/s).</summary>
+        public FreeAnchor Anchor => _freeAnchor;
+        public double FreeSpeedKmS { get; private set; }
         Func<CameraPose?> _onboard;
         double3 _spectatorEcefKm;
         float _trackingZoom = 1f;
@@ -242,13 +261,14 @@ namespace Spaced
             _yawTarget = Yaw;
         }
 
-        public void ViewVehicle(Func<double3?> positionKm, string label, double distanceM)
+        public void ViewVehicle(Func<double3?> positionKm, string label, double distanceM, float pitch = 8f, float? yaw = null)
         {
             BeginTransition(distanceM);
             Mode = ViewMode.Vehicle;
             _vehicle = positionKm;
             TargetLabel = label;
-            Pitch = _pitchTarget = 8f;
+            Pitch = _pitchTarget = pitch;
+            if (yaw.HasValue) Yaw = yaw.Value;
             _yawTarget = Yaw;
         }
 
@@ -274,13 +294,105 @@ namespace Spaced
             _distanceTo = 0;
         }
 
-        void BeginTransition(double newDistance)
+        void BeginTransition(double newDistance, float seconds = 1.4f)
         {
             _transitionFromKm = _pivotKm;
             _distanceFrom = Distance;
             _distanceTo = newDistance;
             _orbitDistanceTarget = newDistance;
             _transition = 0f;
+            _transitionSeconds = seconds;
+        }
+
+        // ───────────────────────────── Free roam ─────────────────────────────
+
+        /// <summary>
+        /// Free roam from wherever the camera is now: drag to orbit, scroll to zoom, WASD to fly, Q/E down/up,
+        /// Shift to go faster. The point you fly around moves with the Earth, or with the Moon once you're near it.
+        /// </summary>
+        public void ViewFree()
+        {
+            double jd = _sim.Clock.JulianDate;
+            double3 pivot = _pivotKm;
+            double distance = Mode == ViewMode.Earth ? _distance : Distance;
+            if (Mode == ViewMode.Earth)
+            {
+                // Keep the same view: the globe camera looks at its focus from straight above (with tilt).
+                GlobePose(jd, out pivot, out double3 offset, out _, out _);
+                double3 up = math.normalize(pivot);
+                Pitch = _pitchTarget = Mathf.Min(89f, (float)(math.asin(math.clamp(math.dot(math.normalize(offset), up), -1, 1)) * MathConst.Rad2Deg));
+                Yaw = _yawTarget = (float)_heading;
+            }
+            SetFreePivot(pivot, jd);
+            _pivotKm = pivot;
+            Mode = ViewMode.Free;
+            TargetLabel = "Free roam";
+            Distance = distance;
+            _distanceTo = distance;
+            _orbitDistanceTarget = distance;
+            _transition = 1f;
+            _yawTarget = Yaw;
+        }
+
+        /// <summary>Glides the free camera to a body (or the Earth–Moon midpoint) and frames it.</summary>
+        public void FreeGoTo(FreeAnchor body, bool wholeSystem = false)
+        {
+            if (Mode != ViewMode.Free) ViewFree();
+            double jd = _sim.Clock.JulianDate;
+            double3 moon = Astro.MoonPosition(jd);
+            double3 target = wholeSystem ? moon * 0.5 : body == FreeAnchor.Moon ? moon : double3.zero;
+            double distance = wholeSystem ? 6.5e8 : body == FreeAnchor.Moon ? 6.0e6 : 2.6e7;
+            double jumpKm = math.distance(_pivotKm, target);
+            BeginTransition(distance, jumpKm > 50000 ? 4f : 1.6f);
+            SetFreePivot(target, jd);
+            if (wholeSystem) { Pitch = _pitchTarget = 0f; Yaw = _yawTarget = 0f; }
+            TargetLabel = wholeSystem ? "Free roam — Earth and Moon" : body == FreeAnchor.Moon ? "Free roam — the Moon" : "Free roam — the Earth";
+        }
+
+        /// <summary>Re-anchors the free pivot to whichever body it is near, keeping its inertial position.</summary>
+        void SetFreePivot(double3 pivotKm, double jd)
+        {
+            double3 moon = Astro.MoonPosition(jd);
+            _freeAnchor = math.distance(pivotKm, moon) < MoonConstants.SoiKm ? FreeAnchor.Moon : FreeAnchor.Earth;
+            _freeOffsetKm = pivotKm - (_freeAnchor == FreeAnchor.Moon ? moon : double3.zero);
+        }
+
+        double3 FreePivot(double jd) => (_freeAnchor == FreeAnchor.Moon ? Astro.MoonPosition(jd) : double3.zero) + _freeOffsetKm;
+
+        void HandleFreeFlight(Keyboard keyboard, float dt)
+        {
+            FreeSpeedKmS = 0;
+            if (keyboard == null || GUIUtility.keyboardControl != 0) return;
+            var move = Vector3.zero;
+            if (keyboard.wKey.isPressed || keyboard.upArrowKey.isPressed) move += Vector3.forward;
+            if (keyboard.sKey.isPressed || keyboard.downArrowKey.isPressed) move += Vector3.back;
+            if (keyboard.dKey.isPressed || keyboard.rightArrowKey.isPressed) move += Vector3.right;
+            if (keyboard.aKey.isPressed || keyboard.leftArrowKey.isPressed) move += Vector3.left;
+            if (keyboard.eKey.isPressed) move += Vector3.up;
+            if (keyboard.qKey.isPressed) move += Vector3.down;
+            if (move == Vector3.zero) return;
+            // Speed grows with how far out you are: a crawl beside a spacecraft, a few seconds from the Earth to the Moon.
+            double speedKmS = math.max(Distance, 50.0) / 1000.0 * 1.2 * (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed ? 6.0 : 1.0);
+            var direction = Far.transform.rotation * move.normalized;
+            double jd = _sim.Clock.JulianDate;
+            double3 pivot = FreePivot(jd) + math.normalize(Astro.UnityToEci(direction)) * speedKmS * dt;
+            SetFreePivot(pivot, jd);
+            FreeSpeedKmS = speedKmS;
+            // Stop the camera point at the surface instead of flying through a planet.
+            double3 moon = Astro.MoonPosition(jd);
+            double moonGap = math.distance(pivot, moon) - MoonConstants.RadiusKm;
+            if (moonGap < 0.01) SetFreePivot(moon + math.normalize(pivot - moon) * (MoonConstants.RadiusKm + 0.01), jd);
+            if (math.length(pivot) < EarthConstants.RadiusKm + 0.05) SetFreePivot(math.normalize(pivot) * (EarthConstants.RadiusKm + 0.05), jd);
+        }
+
+        /// <summary>Free roam keeps the camera itself above the Earth's surface too.</summary>
+        void KeepAboveEarth(ref Vector3 offsetM, ref Quaternion rotation)
+        {
+            double3 camera = _pivotKm + Astro.UnityToEci(offsetM) / 1000.0;
+            double clearanceKm = math.length(camera) - EarthConstants.RadiusKm - 0.05;
+            if (clearanceKm >= 0) return;
+            offsetM += Astro.EciToUnity(math.normalize(camera) * (-clearanceKm * 1000.0));
+            rotation = Quaternion.LookRotation(-offsetM.normalized, rotation * Vector3.up);
         }
 
         // ───────────────────────────── Frame ─────────────────────────────
@@ -312,11 +424,16 @@ namespace Spaced
                 target = double3.zero;
             }
 
-            _transition = Mathf.Min(1f, _transition + Time.unscaledDeltaTime / 1.4f);
+            _transition = Mathf.Min(1f, _transition + Time.unscaledDeltaTime / _transitionSeconds);
             float s = Mathf.SmoothStep(0, 1, _transition);
             _pivotKm = _transition < 1f ? math.lerp(_transitionFromKm, target, s) : target;
             if (_transition < 1f)
+            {
                 Distance = math.exp(math.lerp(math.log(math.max(_distanceFrom, 0.5)), math.log(math.max(_distanceTo, 0.5)), s));
+                // A long jump (the Earth to the Moon) pulls back on the way so you see where you're going.
+                double jumpM = math.distance(_transitionFromKm, target) * 1000.0;
+                if (jumpM > 5.0 * math.max(_distanceFrom, _distanceTo)) Distance += math.sin(math.PI * s) * jumpM * 0.6;
+            }
             ClampDistance();
 
             WorldFrame.OriginKm = _pivotKm;
@@ -355,6 +472,8 @@ namespace Spaced
             {
                 rotation = Basis() * Quaternion.Euler(Pitch, Yaw, 0f);
                 offsetM = rotation * new Vector3(0, 0, -(float)Distance);
+                KeepAboveMoon(jd, ref offsetM, ref rotation);
+                if (Mode == ViewMode.Free) KeepAboveEarth(ref offsetM, ref rotation);
                 SetFieldOfView(FieldOfView);
             }
 
@@ -372,8 +491,10 @@ namespace Spaced
             Near.farClipPlane = 4.0e6f;
 
             CameraEciKm = _pivotKm + Astro.UnityToEci(offsetM) / 1000.0;
-            // The far camera's near plane follows altitude so you can get close to the ground without clipping it.
-            double altitudeM = math.max(CameraAltitudeKm * 1000.0, 1.0);
+            // The far camera's near plane follows the height above the nearer of the Earth and the Moon, so you can get
+            // close to either without clipping it.
+            double moonAltitudeKm = math.length(CameraEciKm - Astro.MoonPosition(jd)) - MoonConstants.RadiusKm;
+            double altitudeM = math.max(math.min(CameraAltitudeKm, moonAltitudeKm) * 1000.0, 1.0);
             Far.nearClipPlane = (float)(math.clamp(altitudeM * 0.3, 1.0, 500000.0) / WorldFrame.MetersPerFarUnit);
             MetersPerPixel = Distance * 2.0 * math.tan(Far.fieldOfView * 0.5 * MathConst.Deg2Rad) / math.max(Screen.height, 1);
             UpdateCursorGeo(jd);
@@ -400,6 +521,8 @@ namespace Spaced
                     var pose = _onboard?.Invoke();
                     valid = pose.HasValue;
                     return pose?.PositionKm ?? default;
+                case ViewMode.Free:
+                    return FreePivot(jd);
                 default:
                     GlobePose(jd, out double3 focus, out _, out _, out _);
                     return focus;
@@ -592,10 +715,29 @@ namespace Spaced
         }
 
         /// <summary>Frame the orbit controls rotate in: world axes around Earth, local horizon elsewhere.</summary>
+        /// <summary>Orbit cameras never dip below the lunar surface (landers sit right on it).</summary>
+        void KeepAboveMoon(double jd, ref Vector3 offsetM, ref Quaternion rotation)
+        {
+            double3 moon = Astro.MoonPosition(jd);
+            double3 camera = _pivotKm + Astro.UnityToEci(offsetM) / 1000.0;
+            double3 fromMoon = camera - moon;
+            double clearanceKm = math.length(fromMoon) - MoonConstants.RadiusKm - 0.004;
+            if (clearanceKm >= 0) return;
+            offsetM += Astro.EciToUnity(math.normalize(fromMoon) * (-clearanceKm * 1000.0));
+            rotation = Quaternion.LookRotation(-offsetM.normalized, rotation * Vector3.up);
+        }
+
+        /// <summary>
+        /// Orbit-camera frame: "up" points away from the Earth, or from the Moon once inside its sphere of influence,
+        /// so the camera's pitch is always measured from the horizon of the body below.
+        /// </summary>
         Quaternion Basis()
         {
             if (Mode == ViewMode.Earth || math.lengthsq(_pivotKm) < 1) return Quaternion.identity;
-            double3 up = math.normalize(_pivotKm);
+            double3 moon = _sim != null ? Astro.MoonPosition(_sim.Clock.JulianDate) : double3.zero;
+            double3 center = _sim != null && math.length(_pivotKm - moon) < MoonConstants.SoiKm ? moon : double3.zero;
+            if (math.lengthsq(_pivotKm - center) < 1) center = double3.zero;
+            double3 up = math.normalize(_pivotKm - center);
             double3 north = new double3(0, 0, 1) - up * up.z;
             if (math.lengthsq(north) < 1e-8) north = new double3(1, 0, 0);
             return WorldFrame.LookRotation(math.normalize(north), up);
@@ -603,7 +745,7 @@ namespace Spaced
 
         void ClampDistance()
         {
-            if (Mode != ViewMode.Earth && _transition >= 1f) Distance = math.clamp(Distance, 3.0, 3e7);
+            if (Mode != ViewMode.Earth && _transition >= 1f) Distance = math.clamp(Distance, 3.0, MaxOrbitDistanceM);
         }
 
         void SetFieldOfView(float fov)
@@ -633,6 +775,8 @@ namespace Spaced
             // Occlusion uses a sphere 50 m below sea level: pads, flame trenches and decks sit slightly under it.
             double occluderM = radiusM - 50.0;
             Shader.SetGlobalVector(EarthCenterLocal, WorldFrame.ToLocal(double3.zero));
+            Shader.SetGlobalVector(MoonCenterLocal, WorldFrame.ToLocal(Astro.MoonPosition(jd)));
+            Shader.SetGlobalFloat(MoonRadiusLocal, (float)(MoonConstants.RadiusKm * 1000.0));
             Shader.SetGlobalFloat(EarthRadiusLocal, (float)radiusM);
             Shader.SetGlobalFloat(CamEarthCLocal, (float)((cameraRadiusM - occluderM) * (cameraRadiusM + occluderM)));
 
@@ -698,6 +842,7 @@ namespace Spaced
                 _rotating = false;
             }
 
+            if (Mode == ViewMode.Free) HandleFreeFlight(keyboard, dt);
             if (Mode == ViewMode.Earth) return;
             float scroll = overUi ? 0 : mouse.scroll.ReadValue().y;
             if (scroll == 0) return;
@@ -705,7 +850,7 @@ namespace Spaced
             float notches = Mathf.Abs(scroll) > 20f ? scroll / 120f : scroll;
             float factor = Mathf.Pow(0.85f, notches);
             if (Mode == ViewMode.GroundTracking) _trackingZoom = Mathf.Clamp(_trackingZoom / factor, 0.1f, 20f);
-            else _orbitDistanceTarget = math.clamp((_orbitDistanceTarget > 0 ? _orbitDistanceTarget : Distance) * factor, 3.0, 3e7);
+            else _orbitDistanceTarget = math.clamp((_orbitDistanceTarget > 0 ? _orbitDistanceTarget : Distance) * factor, 3.0, MaxOrbitDistanceM);
             _distanceTo = _orbitDistanceTarget;
         }
 

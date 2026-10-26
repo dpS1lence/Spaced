@@ -72,6 +72,8 @@ namespace Spaced
         public double LongitudeDeg;
         public double ResolutionM;
         public bool Night;
+        /// <summary>Cloud cover over the spot when the picture was taken (0–1).</summary>
+        public float Cloud;
         public string SavedPath;
     }
 
@@ -91,6 +93,10 @@ namespace Spaced
         public readonly List<ImagingTarget> Targets = new List<ImagingTarget>();
         /// <summary>Furthest a camera may point away from straight down to reach a target.</summary>
         public double MaxOffNadirDeg = 30;
+        /// <summary>Real cloud cover at a place (latitude, longitude → 0–1), if weather is available.</summary>
+        public Func<double, double, float> CloudCover;
+        /// <summary>Requested pictures wait for a pass with less cloud than this.</summary>
+        public const float MaxTargetCloud = 0.5f;
         public event Action<CapturedImage> ImageCaptured;
 
         /// <summary>Equirectangular map (Earth-fixed): R = communications coverage, G = navigation fix available.</summary>
@@ -278,6 +284,7 @@ namespace Spaced
             double swathKm = 2.0 * slantKm * math.tan(fov * 0.5 * MathConst.Deg2Rad);
 
             bool night = math.dot(math.normalize(ground), Astro.EciToEcef(Astro.SunDirection(jd), jd)) < -0.05;
+            float cloud = CloudCover?.Invoke(lat, lon) ?? 0f;
             // Frame the swath with 3 × 3 tiles; detail is limited by the 10 m source imagery.
             double tileKmAtZ0 = 40075.0 * math.cos(lat * MathConst.Deg2Rad);
             int zoom = (int)math.clamp(math.floor(math.log2(3.0 * tileKmAtZ0 / math.max(swathKm, 0.1))), 5, 14);
@@ -292,6 +299,7 @@ namespace Spaced
                 LongitudeDeg = lon,
                 ResolutionM = math.max(math.max(sensor, framePixel), 10.0),
                 Night = night,
+                Cloud = cloud,
                 SwathKm = swathKm,
                 OffNadirDeg = offNadir,
                 AltitudeKm = altitude,
@@ -303,6 +311,7 @@ namespace Spaced
                 _capturing = false;
                 image.Texture = mosaic.Texture;
                 if (night) Darken(image.Texture);
+                else if (cloud > 0.12f) AddClouds(image.Texture, cloud, (int)(jd * 1440) ^ index);
                 Gallery.Insert(0, image);
                 while (Gallery.Count > MaxGallery)
                 {
@@ -320,6 +329,30 @@ namespace Spaced
                 _sim.Log($"{image.Satellite}: imaged {what}{(night ? " (night pass)" : "")}");
             }, keepReadable: true));
             return true;
+        }
+
+        /// <summary>Real clouds were over the spot: lay soft, lumpy cloud over the picture in proportion to the cover.</summary>
+        static void AddClouds(Texture2D texture, float cover, int seed)
+        {
+            var pixels = texture.GetPixels32();
+            int w = texture.width, h = texture.height;
+            float ox = (seed & 1023) * 0.37f, oy = ((seed >> 10) & 1023) * 0.53f;
+            float threshold = 1f - cover;
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    float n = ProceduralTextures.Fbm(x / 90f + ox, y / 90f + oy, 5);
+                    float a = Mathf.SmoothStep(threshold - 0.12f, threshold + 0.18f, n * 0.55f + cover * 0.45f);
+                    if (a <= 0.001f) continue;
+                    int i = y * w + x;
+                    var c = pixels[i];
+                    byte v = (byte)(225 + 30 * n);
+                    pixels[i] = new Color32((byte)Mathf.Lerp(c.r, v, a), (byte)Mathf.Lerp(c.g, v, a), (byte)Mathf.Lerp(c.b, v + 4, a), 255);
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply(true, false);
         }
 
         static void Darken(Texture2D texture)
@@ -361,6 +394,7 @@ namespace Spaced
                 if (target.Captured) continue;
                 double3 ground = Astro.GeoToEcef(target.LatitudeDeg, target.LongitudeDeg, 0);
                 if (math.dot(math.normalize(ground), sun) < 0.05) continue; // wait for daylight
+                if ((CloudCover?.Invoke(target.LatitudeDeg, target.LongitudeDeg) ?? 0f) > MaxTargetCloud) continue; // and a clear sky
                 foreach (var group in Groups)
                 {
                     if (group.Role != PayloadRole.Imaging || group.Alive == 0) continue;
@@ -390,6 +424,80 @@ namespace Spaced
             return path;
         }
 
+        // ───────────────────────────── Saving ─────────────────────────────
+
+        public void WriteSave(SaveData data, List<byte[]> images)
+        {
+            foreach (var g in Groups)
+                data.Groups.Add(new GroupSave
+                {
+                    Name = g.Name, Class = g.Class, Role = g.Role, CreatedJd = g.CreatedJd, LastCaptureJd = g.LastCaptureJd,
+                    AutoCapture = g.AutoCapture, StationKeeping = g.StationKeeping, AvoidsCollisions = g.AvoidsCollisions,
+                });
+            foreach (var image in Gallery)
+            {
+                int png = -1;
+                if (image.Texture != null)
+                {
+                    try { images.Add(image.Texture.EncodeToPNG()); png = images.Count - 1; }
+                    catch (Exception) { } // not readable: the picture is lost, its record stays
+                }
+                data.Gallery.Add(new ImageSave
+                {
+                    Satellite = image.Satellite, SavedPath = image.SavedPath, JulianDate = image.JulianDate,
+                    LatitudeDeg = image.LatitudeDeg, LongitudeDeg = image.LongitudeDeg, ResolutionM = image.ResolutionM,
+                    SwathKm = image.SwathKm, OffNadirDeg = image.OffNadirDeg, AltitudeKm = image.AltitudeKm, Night = image.Night,
+                    TargetIndex = image.Target != null ? Targets.IndexOf(image.Target) : -1, Png = png,
+                });
+            }
+            foreach (var t in Targets)
+                data.Targets.Add(new TargetSave
+                {
+                    Name = t.Name, LatitudeDeg = t.LatitudeDeg, LongitudeDeg = t.LongitudeDeg, RequestedJd = t.RequestedJd,
+                    Captured = t.Captured, ImageIndex = t.Image != null ? Gallery.IndexOf(t.Image) : -1,
+                });
+        }
+
+        public void RestoreSave(SaveData data, List<byte[]> images)
+        {
+            foreach (var image in Gallery)
+                if (image.Texture != null) Destroy(image.Texture);
+            Groups.Clear();
+            Gallery.Clear();
+            Targets.Clear();
+            foreach (var g in data.Groups)
+                Groups.Add(new SatelliteGroup
+                {
+                    Id = Groups.Count, Name = g.Name, Class = g.Class, Role = g.Role, CreatedJd = g.CreatedJd, LastCaptureJd = g.LastCaptureJd,
+                    AutoCapture = g.AutoCapture, StationKeeping = g.StationKeeping, AvoidsCollisions = g.AvoidsCollisions,
+                });
+            foreach (var t in data.Targets)
+                Targets.Add(new ImagingTarget { Name = t.Name, LatitudeDeg = t.LatitudeDeg, LongitudeDeg = t.LongitudeDeg, RequestedJd = t.RequestedJd, Captured = t.Captured });
+            foreach (var i in data.Gallery)
+            {
+                Texture2D texture = null;
+                if (i.Png >= 0 && i.Png < images.Count)
+                {
+                    texture = new Texture2D(2, 2, TextureFormat.RGBA32, true) { name = "Capture " + i.Satellite };
+                    texture.LoadImage(images[i.Png], false);
+                }
+                var image = new CapturedImage
+                {
+                    Satellite = i.Satellite, SavedPath = string.IsNullOrEmpty(i.SavedPath) ? null : i.SavedPath, JulianDate = i.JulianDate,
+                    LatitudeDeg = i.LatitudeDeg, LongitudeDeg = i.LongitudeDeg, ResolutionM = i.ResolutionM, SwathKm = i.SwathKm,
+                    OffNadirDeg = i.OffNadirDeg, AltitudeKm = i.AltitudeKm, Night = i.Night, Texture = texture,
+                    Target = i.TargetIndex >= 0 && i.TargetIndex < Targets.Count ? Targets[i.TargetIndex] : null,
+                };
+                Gallery.Add(image);
+            }
+            for (int k = 0; k < data.Targets.Count; k++)
+            {
+                int index = data.Targets[k].ImageIndex;
+                if (index >= 0 && index < Gallery.Count) Targets[k].Image = Gallery[index];
+            }
+            RefreshGroups();
+        }
+
         // ───────────────────────────── Frame ─────────────────────────────
 
         static readonly int CoverageTex = Shader.PropertyToID("_SpacedCoverageTex");
@@ -399,7 +507,7 @@ namespace Spaced
         {
             if (_sim == null || _sim.Catalog == null) return;
             ServeTargets();
-            bool visible = ShowCoverage && !Cinematic.Active && (CommsCoveragePercent > 0 || NavCoveragePercent > 0);
+            bool visible = ShowCoverage && !Cinematic.Active && !Cinematic.SatellitesHidden && (CommsCoveragePercent > 0 || NavCoveragePercent > 0);
             Shader.SetGlobalTexture(CoverageTex, CoverageTexture);
             Shader.SetGlobalFloat(CoverageStrength, visible ? 1f : 0f);
             _timer -= Time.unscaledDeltaTime;

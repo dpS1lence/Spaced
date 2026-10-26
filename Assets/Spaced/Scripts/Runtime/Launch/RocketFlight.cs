@@ -32,9 +32,9 @@ namespace Spaced
     }
 
     /// <summary>
-    /// Physically integrated Falcon 9 flight in the inertial frame (metres, seconds), launched from a
-    /// pad that rotates with the Earth. Includes gravity, thrust that varies with ambient pressure,
-    /// Mach-dependent drag and a throttle bucket at max-Q.
+    /// Physically integrated two-stage flight (Falcon 9 or Starship, see <see cref="LaunchVehicle"/>) in the
+    /// inertial frame (metres, seconds), launched from a pad that rotates with the Earth. Includes gravity, thrust
+    /// that varies with ambient pressure, Mach-dependent drag and a throttle bucket at max-Q.
     /// <para>First stage: vertical rise, pitch kick, then a zero-angle-of-attack gravity turn.</para>
     /// <para>Second stage: closed-loop altitude/vertical-speed guidance that builds horizontal speed at the
     /// insertion altitude and cuts off when apoapsis reaches the target. Higher targets coast to apoapsis
@@ -50,13 +50,9 @@ namespace Spaced
         /// <summary>At most 1,200 simulated seconds per <see cref="Advance"/> call.</summary>
         public const int MaxStepsPerAdvance = 12000;
 
-        // Tuned offline across LEO/SSO/MEO/GTO missions from all three pads: every one reaches orbit and lands.
-        const double PitchKickStart = 7, PitchKickDuration = 10, KickHeavyDeg = 4.8, KickLightDeg = 6.5;
         const double HoldOmega = 0.012, MaxSinPitch = 0.7;
-        const double MaxQLimitPa = 32000;
-        const double FairingSeparationAltitudeM = 112000;
-        const double StageCoastSeconds = 7;
 
+        public readonly LaunchVehicle Vehicle;
         public readonly LaunchSite Site;
         public readonly double LiftoffJd;
         public readonly double PayloadKg;
@@ -69,7 +65,7 @@ namespace Spaced
         /// Pitch-kick angle. Lighter payloads give a higher thrust-to-weight ratio and need a harder turn,
         /// otherwise the trajectory lofts and wastes second-stage propellant.
         /// </summary>
-        public double PitchKickDeg => math.lerp(KickLightDeg, KickHeavyDeg, math.saturate(PayloadKg / 16000.0));
+        public double PitchKickDeg => math.lerp(Vehicle.KickLightDeg, Vehicle.KickHeavyDeg, math.saturate(PayloadKg / Vehicle.HeavyPayloadKg));
 
         public FlightPhase Phase { get; private set; } = FlightPhase.Countdown;
         public double MissionTime { get; private set; } = -CountdownSeconds;
@@ -78,10 +74,10 @@ namespace Spaced
         /// <summary>Upper stack (whole vehicle before staging) position and velocity, m and m/s.</summary>
         public double3 Position;
         public double3 Velocity;
-        public double BoosterPropellantKg = Falcon9.BoosterPropKg;
-        public double SecondPropellantKg = Falcon9.SecondPropKg;
+        public double BoosterPropellantKg;
+        public double SecondPropellantKg;
         public bool BoosterAttached = true;
-        public bool FairingAttached = true;
+        public bool FairingAttached;
         public bool PayloadAttached = true;
         public double Throttle;
         public int EnginesLit;
@@ -114,8 +110,12 @@ namespace Spaced
         double _previousQ;
         double _circularizationStartTime = double.MaxValue;
 
-        public RocketFlight(LaunchSite site, double liftoffJd, double payloadKg, double targetAltitudeKm, double3 planeNormal)
+        public RocketFlight(LaunchVehicle vehicle, LaunchSite site, double liftoffJd, double payloadKg, double targetAltitudeKm, double3 planeNormal)
         {
+            Vehicle = vehicle;
+            BoosterPropellantKg = vehicle.BoosterPropKg;
+            SecondPropellantKg = vehicle.SecondPropKg;
+            FairingAttached = vehicle.HasFairing;
             Site = site;
             LiftoffJd = liftoffJd;
             PayloadKg = payloadKg;
@@ -130,8 +130,8 @@ namespace Spaced
 
         public double3 PadEcefKm(double heightM) => Astro.GeoToEcef(Site.LatitudeDeg, Site.LongitudeDeg, heightM / 1000.0);
 
-        double UpperMass => Falcon9.SecondDryKg + SecondPropellantKg + (PayloadAttached ? PayloadKg : 0) + (FairingAttached ? Falcon9.FairingKg : 0);
-        double TotalMass => UpperMass + (BoosterAttached ? Falcon9.BoosterDryKg + BoosterPropellantKg : 0);
+        public double UpperMass => Vehicle.SecondDryKg + SecondPropellantKg + (PayloadAttached ? PayloadKg : 0) + (FairingAttached ? Vehicle.FairingKg : 0);
+        double TotalMass => UpperMass + (BoosterAttached ? Vehicle.BoosterDryKg + BoosterPropellantKg : 0);
 
         /// <summary>Sim time accumulated but not yet stepped (0 … 0.1 s). Renderers extrapolate by it.</summary>
         public double RenderLead => _accumulator;
@@ -161,7 +161,7 @@ namespace Spaced
 
         void PinToPad()
         {
-            Position = Astro.EcefToEci(PadEcefKm(0), JulianDate) * 1000.0;
+            Position = Astro.EcefToEci(PadEcefKm(Site.MountHeightM), JulianDate) * 1000.0;
             Velocity = Astro.EarthRotationVelocity(Position);
         }
 
@@ -178,7 +178,7 @@ namespace Spaced
                     if (MissionTime >= -3)
                     {
                         if (EnginesLit == 0) Raise("Engine ignition");
-                        EnginesLit = Falcon9.BoosterEngines;
+                        EnginesLit = Vehicle.BoosterEngines;
                         Throttle = math.saturate((MissionTime + 3) / 2.0);
                         ThrustDirection = math.normalize(Position);
                     }
@@ -216,9 +216,9 @@ namespace Spaced
             TrackMaxQ();
 
             double pitchFromVertical;
-            if (MissionTime < PitchKickStart) pitchFromVertical = 0;
-            else if (MissionTime < PitchKickStart + PitchKickDuration)
-                pitchFromVertical = PitchKickDeg * MathConst.Deg2Rad * (MissionTime - PitchKickStart) / PitchKickDuration;
+            if (MissionTime < Vehicle.PitchKickStart) pitchFromVertical = 0;
+            else if (MissionTime < Vehicle.PitchKickStart + Vehicle.PitchKickDuration)
+                pitchFromVertical = PitchKickDeg * MathConst.Deg2Rad * (MissionTime - Vehicle.PitchKickStart) / Vehicle.PitchKickDuration;
             else
             {
                 // Gravity turn: point along the air-relative velocity so the angle of attack stays zero.
@@ -230,16 +230,18 @@ namespace Spaced
             ThrustDirection = math.normalize(math.cos(pitchFromVertical) * up + math.sin(pitchFromVertical) * heading);
 
             // Throttle bucket through max-Q, then cap acceleration near burnout.
-            Throttle = DynamicPressure > MaxQLimitPa ? math.clamp(MaxQLimitPa / DynamicPressure, 0.6, 1.0) : 1.0;
-            double thrust = Falcon9.BoosterThrust(density, Falcon9.BoosterEngines) * Throttle;
-            if (thrust / TotalMass > 5.0 * 9.81) Throttle *= 5.0 * 9.81 * TotalMass / thrust;
-            thrust = Falcon9.BoosterThrust(density, Falcon9.BoosterEngines) * Throttle;
-            EnginesLit = Falcon9.BoosterEngines;
+            Throttle = DynamicPressure > Vehicle.MaxQLimitPa ? math.clamp(Vehicle.MaxQLimitPa / DynamicPressure, 0.6, 1.0) : 1.0;
+            int engines = Vehicle.BoosterEngines;
+            double thrust = Vehicle.BoosterThrust(density, engines) * Throttle;
+            double maxAcceleration = Vehicle.MaxAscentG * 9.81;
+            if (thrust / TotalMass > maxAcceleration) Throttle *= maxAcceleration * TotalMass / thrust;
+            thrust = Vehicle.BoosterThrust(density, engines) * Throttle;
+            EnginesLit = engines;
 
-            BoosterPropellantKg -= Falcon9.BoosterMassFlow(Falcon9.BoosterEngines) * Throttle * h;
-            Integrate(ThrustDirection * thrust, Falcon9.AscentDragCoefficient(airSpeed / 320.0), h);
+            BoosterPropellantKg -= Vehicle.BoosterMassFlow(engines) * Throttle * h;
+            Integrate(ThrustDirection * thrust, LaunchVehicle.AscentDragCoefficient(airSpeed / 320.0), h);
 
-            if (BoosterPropellantKg <= Falcon9.LandingReserveKg) Separate();
+            if (BoosterPropellantKg <= Vehicle.LandingReserveKg) Separate();
         }
 
         void TrackMaxQ()
@@ -264,29 +266,34 @@ namespace Spaced
 
             Booster = new BoosterDescent
             {
+                Vehicle = Vehicle,
                 Position = Position,
                 Velocity = Velocity - ThrustDirection * 1.0,
                 PropellantKg = BoosterPropellantKg,
                 JulianDate = JulianDate,
                 ThrustDirection = ThrustDirection,
+                TargetEcefKm = Astro.GeoToEcef(Site.LatitudeDeg, Site.LongitudeDeg, Vehicle.CatchHeightM / 1000.0),
             };
             Velocity += ThrustDirection * 1.0;
 
-            // Fly a copy of the booster ahead of time to find where it comes down; park the droneship there.
-            var prediction = Booster.Clone();
-            for (int i = 0; i < 30000 && !prediction.Finished; i++) prediction.Step(StepSeconds);
-            HasDroneship = prediction.Phase == BoosterPhase.Landed;
-            DroneshipEcefKm = prediction.TouchdownEcefKm;
-            Raise("Stage separation");
+            if (Vehicle.Recovery == BoosterRecovery.Droneship)
+            {
+                // Fly a copy of the booster ahead of time to find where it comes down; park the droneship there.
+                var prediction = Booster.Clone();
+                for (int i = 0; i < 30000 && !prediction.Finished; i++) prediction.Step(StepSeconds);
+                HasDroneship = prediction.Phase == BoosterPhase.Landed;
+                DroneshipEcefKm = prediction.TouchdownEcefKm;
+            }
+            Raise(Vehicle.Kind == VehicleKind.Starship ? "Hot staging" : "Stage separation");
         }
 
         void FlyStageSeparation(double h)
         {
             Integrate(double3.zero, 0.3, h);
-            if (MissionTime - _separationTime >= StageCoastSeconds)
+            if (MissionTime - _separationTime >= Vehicle.StageCoastSeconds)
             {
                 Phase = FlightPhase.SecondStage;
-                Raise("Second stage engine start (SES-1)");
+                Raise(Vehicle.Kind == VehicleKind.Starship ? "Ship engine start (SES-1)" : "Second stage engine start (SES-1)");
             }
         }
 
@@ -299,7 +306,8 @@ namespace Spaced
             double horizontalSpeed = math.length(horizontalVelocity);
             double gravity = EarthConstants.Mu * 1e9 / (r * r);
             double mass = UpperMass;
-            double thrustAccel = Falcon9.SecondThrust / mass;
+            Throttle = UpperStageThrottle(mass);
+            double thrustAccel = Vehicle.SecondThrust * Throttle / mass;
 
             // Second-order altitude hold at the insertion altitude, limited so the stage lofts gently.
             double targetRadius = (EarthConstants.RadiusKm + InsertionAltitudeKm) * 1000.0;
@@ -308,13 +316,12 @@ namespace Spaced
             double sinPitch = math.clamp((commanded + gravity - horizontalSpeed * horizontalSpeed / r) / thrustAccel, -0.35, MaxSinPitch);
 
             ThrustDirection = math.normalize(sinPitch * up + math.sqrt(1 - sinPitch * sinPitch) * InPlaneHeading(up));
-            Throttle = 1;
-            EnginesLit = 1;
-            SecondPropellantKg -= Falcon9.SecondMassFlow * h;
+            EnginesLit = Vehicle.SecondEngines;
+            SecondPropellantKg -= Vehicle.SecondMassFlow * Throttle * h;
 
-            if (FairingAttached && AltitudeKm * 1000.0 > FairingSeparationAltitudeM) JettisonFairing(up);
+            if (FairingAttached && AltitudeKm * 1000.0 > Vehicle.FairingSeparationAltitudeM) JettisonFairing(up);
 
-            Integrate(ThrustDirection * Falcon9.SecondThrust, 0.3, h);
+            Integrate(ThrustDirection * Vehicle.SecondThrust * Throttle, 0.3, h);
 
             OrbitShape(out double periapsisKm, out double apoapsisKm);
             bool direct = TargetAltitudeKm - InsertionAltitudeKm < 10;
@@ -331,6 +338,10 @@ namespace Spaced
                 else Fail("Vehicle did not reach orbit");
             }
         }
+
+        /// <summary>Throttles the upper stage back so it doesn't exceed its acceleration limit as the tanks empty.</summary>
+        double UpperStageThrottle(double mass) =>
+            math.clamp(Vehicle.MaxUpperStageG * 9.81 * mass / Vehicle.SecondThrust, Vehicle.MinThrottle, 1.0);
 
         double3 InPlaneHeading(double3 up)
         {
@@ -359,8 +370,8 @@ namespace Spaced
             double apoRadius = el.A * (1 + el.E) * 1000.0;
             double apoSpeed = math.sqrt(EarthConstants.Mu * 1e9 * (2 / apoRadius - 1 / (el.A * 1000.0)));
             double deltaV = math.sqrt(EarthConstants.Mu * 1e9 / apoRadius) - apoSpeed;
-            double finalMass = UpperMass * math.exp(-deltaV / (Falcon9.SecondIsp * Falcon9.G0));
-            double burnTime = (UpperMass - finalMass) / Falcon9.SecondMassFlow;
+            double finalMass = UpperMass * math.exp(-deltaV / (Vehicle.SecondIsp * LaunchVehicle.G0));
+            double burnTime = (UpperMass - finalMass) / (Vehicle.SecondMassFlow * UpperStageThrottle(UpperMass));
             _circularizationStartTime = MissionTime + timeToApo - burnTime / 2;
         }
 
@@ -370,10 +381,10 @@ namespace Spaced
             double verticalSpeed = math.dot(Velocity, up);
             double sinPitch = math.clamp(-verticalSpeed / 150.0, -0.3, 0.3);
             ThrustDirection = math.normalize(sinPitch * up + math.sqrt(1 - sinPitch * sinPitch) * InPlaneHeading(up));
-            Throttle = 1;
-            EnginesLit = 1;
-            SecondPropellantKg -= Falcon9.SecondMassFlow * h;
-            Integrate(ThrustDirection * Falcon9.SecondThrust, 0, h);
+            Throttle = UpperStageThrottle(UpperMass);
+            EnginesLit = Vehicle.SecondEngines;
+            SecondPropellantKg -= Vehicle.SecondMassFlow * Throttle * h;
+            Integrate(ThrustDirection * Vehicle.SecondThrust * Throttle, 0, h);
 
             OrbitShape(out double periapsisKm, out double apoapsisKm);
             if (periapsisKm >= TargetAltitudeKm - 3 || apoapsisKm > TargetAltitudeKm + 40 || SecondPropellantKg <= 0)
@@ -431,7 +442,7 @@ namespace Spaced
             {
                 double3 air = AirVelocity;
                 double density = Atmosphere.Density(AltitudeKm);
-                acceleration -= 0.5 * density * math.length(air) * dragCoefficient * Falcon9.CrossSectionM2 / mass * air;
+                acceleration -= 0.5 * density * math.length(air) * dragCoefficient * Vehicle.CrossSectionM2 / mass * air;
             }
             Velocity += acceleration * h;
             Position += Velocity * h;

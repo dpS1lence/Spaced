@@ -11,7 +11,7 @@ namespace Spaced.Tests
         static RocketFlight Fly(LaunchSite site, double altitudeKm, double inclinationDeg, double payloadKg)
         {
             var normal = LaunchPlanner.PlaneForImmediateLaunch(site, inclinationDeg, Jd, out _);
-            var flight = new RocketFlight(site, Jd, payloadKg, altitudeKm, normal);
+            var flight = new RocketFlight(LaunchVehicle.Falcon9, site, Jd, payloadKg, altitudeKm, normal);
             for (int i = 0; i < 6 * 3600 && !flight.Finished; i++) flight.Advance(1.0);
             return flight;
         }
@@ -23,7 +23,7 @@ namespace Spaced.Tests
         public void Falcon9_ReachesOrbitAtCapacity_AndLandsBooster(int siteIndex, double altitudeKm, double inclinationDeg)
         {
             var site = LaunchSite.All[siteIndex];
-            double payload = LaunchPlanner.MaxPayloadKg(site, altitudeKm, inclinationDeg);
+            double payload = LaunchPlanner.MaxPayloadKg(LaunchVehicle.Falcon9, site, altitudeKm, inclinationDeg);
             var flight = Fly(site, altitudeKm, inclinationDeg, payload);
 
             Assert.AreEqual(FlightPhase.Complete, flight.Phase);
@@ -42,7 +42,7 @@ namespace Spaced.Tests
         {
             var site = LaunchSite.All[0];
             var normal = LaunchPlanner.PlaneForImmediateLaunch(site, 53, Jd, out _);
-            var flight = new RocketFlight(site, Jd, 15000, 550, normal);
+            var flight = new RocketFlight(LaunchVehicle.Falcon9, site, Jd, 15000, 550, normal);
             while (flight.BoosterAttached) flight.Advance(0.1);
 
             // Real Starlink missions: MECO around T+2:20–2:40 at ~65–80 km and ~8,000 km/h.
@@ -70,8 +70,8 @@ namespace Spaced.Tests
         {
             var cape = LaunchSite.All[0];
             // SpaceX quotes ~17.4 t to LEO with recovery and ~5.5 t to GTO.
-            Assert.That(LaunchPlanner.MaxPayloadKg(cape, 550, 53), Is.InRange(14000.0, 19000.0));
-            Assert.That(LaunchPlanner.MaxPayloadKg(cape, 35786, 28.5), Is.InRange(4500.0, 7500.0));
+            Assert.That(LaunchPlanner.MaxPayloadKg(LaunchVehicle.Falcon9, cape, 550, 53), Is.InRange(14000.0, 19000.0));
+            Assert.That(LaunchPlanner.MaxPayloadKg(LaunchVehicle.Falcon9, cape, 35786, 28.5), Is.InRange(4500.0, 7500.0));
         }
 
         [Test]

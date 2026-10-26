@@ -1,10 +1,12 @@
 # Spaced
 
-A satellite simulation sandbox in Unity. It loads today's real catalog of tracked objects from
-CelesTrak and draws them around a real, rotating Earth. Then you launch your own satellites on a
-physically flown Falcon 9 from a real SpaceX pad, watch the booster land on a droneship, and
-fast-forward to see what your constellation does to low Earth orbit: drag decay, collisions, debris
-cascades. When you're done, clean your satellites up again.
+A space company game in Unity, set in today's real sky. It loads the real catalog of tracked
+objects from CelesTrak and draws them around a real, rotating Earth under today's real clouds. You
+run a launch company: take contracts, fly them on a physically simulated Falcon 9 or Starship from
+real pads, land the boosters on droneships or catch them with the tower, build constellations that
+earn money, and work your way to the Moon. A sandbox mode keeps everything free and unlocked, so you
+can fast-forward and see what your constellation does to low Earth orbit: drag decay, collisions,
+debris cascades.
 
 See [Docs/GAME_PLAN.md](Docs/GAME_PLAN.md) for the design, the physics and the roadmap.
 
@@ -14,7 +16,7 @@ See [Docs/GAME_PLAN.md](Docs/GAME_PLAN.md) for the design, the physics and the r
 1. Open the project in Unity **6000.4.5f1** and let the scripts compile.
 2. Run **Spaced → Set Up Project** from the menu bar (once). It switches URP to the 3D Universal
    Renderer, names the `SpacedLocal` layer and creates `Assets/Scenes/Spaced.unity`.
-3. Press **Play**. The first run downloads about 7 MB of orbital data and about 13 MB of NASA
+3. Press **Play** and pick **New career** (or **Sandbox**) in the main menu. The first run downloads about 7 MB of orbital data and about 13 MB of NASA
    imagery (Blue Marble for the current month, Black Marble city lights, clouds). Everything is cached
    in `Application.persistentDataPath`.
 
@@ -40,6 +42,79 @@ for nitrogen puffs at staging and during the booster's flip, and the vapour coll
 Use **Mission Control** to pick a camera yourself (pad, chase, booster, droneship, stage 2
 onboard, booster onboard), or **Skip to T-1 min** for later launches. Launches nobody is watching
 at high time warp are resolved in one step: their satellites still appear in the right orbits.
+
+## Career
+
+The main menu offers a **career** (the game) and a **sandbox** (everything free). In a career you
+start with $250M, one pad (SLC-40) and Falcon 9:
+
+- **Contracts** — the board offers jobs from customers: deploy satellites to a given orbit, build a
+  constellation over several planes and launches, photograph a place, or fly to the Moon. Accept one,
+  pick the rocket and pad, check the cost against the reward, and book the launch. You're paid when
+  the satellites reach orbit (or the picture is taken, or the spacecraft makes it). Miss the deadline
+  and you pay a penalty and lose reputation. Offers expire, and urgent ones pay a premium.
+- **Your own business** — satellites you launch yourself (Launch tab, cost = rockets + satellites)
+  earn money every day: Comms satellites for the share of the globe they cover, Navigation ones for
+  theirs, Imaging ones for each picture they sell.
+- **Bills** — staff, facilities and satellite operations are charged monthly. Below $0 for 45 days
+  and the company goes bankrupt.
+- **Reputation** grows with every delivered contract, landed booster and milestone, and drops with
+  failures. It brings bigger contracts (constellations, geostationary satellites, the Moon) and the
+  right to buy upgrades in the **Company** tab: pad LC-39A, Vandenberg for polar orbits, and the
+  Starship programme with its Starbase pad.
+- **Milestones** (first launch, first landing, tower catch, 100 satellites, first Moon landing…) pay
+  bonuses; random events (solar storms with brilliant aurorae, grants, investors, insurance bills)
+  keep things moving.
+
+A career runs forwards only: no reverse time and no jumping back to "now".
+
+### Saving
+
+The game saves itself every three minutes, when you press **Save**, and when you quit, to
+`persistentDataPath/saves/career.spaced` (or `sandbox.spaced`). A save holds the whole simulation:
+every object in orbit (including your debris), your fleet, the gallery pictures, scheduled launches,
+Moon missions in flight and the company. **Continue** in the main menu picks up where you left off;
+launches that were in the air reach orbit straight away.
+
+## The Moon
+
+The **The Moon** side of the Launch tab flies real lunar trajectories under Earth and Moon gravity:
+a parking orbit timed so its plane holds the Moon at arrival, trans-lunar injection by the Falcon 9
+upper stage (or the refuelled Ship), mid-course corrections planned on a background thread, then
+either a free-return **flyby** with re-entry, **lunar orbit** insertion, or orbit, deorbit and a
+throttled powered descent to a **landing**. The director slows time for every burn and picks shots:
+the spacecraft, the whole Earth–Moon trajectory, the spacecraft over the Moon, and the landing site
+with its regolith and boulders.
+
+While you follow a Moon mission (or fly the camera out past 150,000 km), the ~20,000 Earth-orbit
+satellites are hidden and simulated in coarser steps (a few times a second, collisions once a
+second), which takes load off the PC. Untick *Hide Earth-orbit satellites* in Mission Control to
+keep them.
+
+### Free roam
+
+Press **G** (or **Free roam** in the top bar) to fly the camera yourself anywhere between the Earth and the
+Moon: WASD or the arrows to fly, Q/E down and up, hold Shift to go faster, drag to look around and
+scroll to zoom. The buttons jump to the Earth, the Moon or a view of both; the camera moves with
+whichever body you're near, so the Moon doesn't run away at high time warp. Esc or G goes back.
+
+## Starship
+
+Starship launches from Starbase, Texas: 33 Raptors, hot staging, a boostback burn and a catch by the
+tower's chopsticks. It lifts more than 100 tonnes, so constellations need far fewer launches, and it
+can land on the Moon after refuelling in orbit.
+
+## Real weather
+
+- **Clouds** are rebuilt from today's satellite pictures: the geostationary infrared mosaic from
+  GOES-East, GOES-West and Himawari (every 10 minutes, day and night) and, where those don't reach
+  (Europe, Africa, the Indian Ocean), the latest daily VIIRS pass. Far from today the classic cloud
+  map is used instead.
+- **Launch weather**: every pad has an hourly Open-Meteo forecast, and droneship areas a wave
+  forecast. Gusts over 15 m/s, thunderstorms, heavy rain or waves over 4 m at the droneship scrub the
+  launch at T-60 s and it is rebooked for the next opportunity (turn this off in Mission Control).
+- **Imaging**: pictures taken under cloud show it, and requested pictures (and imaging contracts) wait
+  for a clear pass.
 
 ## Your satellites
 
@@ -215,3 +290,7 @@ Standard URP Lit materials work: a directional light follows the real Sun.
 - Elevation: [Terrain Tiles on AWS](https://registry.opendata.aws/terrain-tiles/) (Mapzen "Terrarium"
   encoding; SRTM, GMTED2010, ETOPO1 and other sources). Cached in `persistentDataPath/terrain`.
 - Falcon 9 figures: SpaceX Falcon User's Guide and public flight telemetry.
+- Live clouds: GOES-East / GOES-West ABI and Himawari AHI band 13 (clean infrared), and NOAA-20 VIIRS
+  corrected reflectance, from [NASA GIBS](https://earthdata.nasa.gov/gibs). Cached in
+  `persistentDataPath/weather`.
+- Forecasts and waves: [Open-Meteo](https://open-meteo.com) weather and marine APIs, CC BY 4.0.

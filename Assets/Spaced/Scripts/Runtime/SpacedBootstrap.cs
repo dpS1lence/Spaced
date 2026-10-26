@@ -24,6 +24,7 @@ namespace Spaced
         {
             var sim = gameObject.AddComponent<SpaceSimulation>();
             sim.CelestrakGroups = CelestrakGroups;
+            sim.AutoLoadCatalog = false; // the main menu picks a new game or a save
 
             var hud = gameObject.AddComponent<SpacedHud>();
             var satellites = gameObject.AddComponent<SatelliteRenderer>();
@@ -49,13 +50,26 @@ namespace Spaced
             var fx = new Fx(FindShader("Spaced/Plume"), FindShader("Spaced/Smoke"));
             gameObject.AddComponent<SatelliteModelRenderer>().Init(sim, rig, materials, SatelliteModels);
 
+            var lunar = gameObject.AddComponent<LunarMissionManager>();
+            lunar.Init(sim, rig, satellites, materials, fx, FindShader("Spaced/UnlitColor"));
             var launches = gameObject.AddComponent<LaunchManager>();
-            launches.Init(sim, rig, satellites, materials, fx, FindShader("Spaced/Ground"));
+            launches.Init(sim, rig, satellites, materials, fx, FindShader("Spaced/Ground"), lunar);
+            var weather = gameObject.AddComponent<WeatherService>();
+            weather.Init(sim, earth);
+            launches.Weather = weather;
 
             var fleet = gameObject.AddComponent<FleetManager>();
             fleet.Init(sim);
+            fleet.CloudCover = weather.CloudCover;
 
-            hud.Init(sim, rig, launches, satellites, fleet);
+            hud.Init(sim, rig, launches, lunar, satellites, fleet);
+
+            var career = gameObject.AddComponent<CareerManager>();
+            career.Init(sim, launches, lunar, fleet, rig);
+            var session = gameObject.AddComponent<GameSession>();
+            session.Init(sim, rig, launches, lunar, fleet, career, hud);
+            hud.AttachCareer(career, session);
+            hud.Weather = weather;
 
             var audio = gameObject.AddComponent<SpacedAudio>();
             audio.Init(sim, rig, launches, fleet, hud.IsPointerOverUI);

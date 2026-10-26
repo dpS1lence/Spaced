@@ -5,9 +5,10 @@ using UnityEngine.Rendering;
 namespace Spaced
 {
     /// <summary>
-    /// The visible Falcon 9 for one <see cref="RocketFlight"/>: stack, booster and second stage after staging,
-    /// fairing halves, plumes, exhaust trail, legs and grid fins. Attitude follows the guidance with a finite
-    /// turn rate, so the booster visibly flips after separation.
+    /// The visible rocket for one <see cref="RocketFlight"/>. Falcon 9: stack, booster and second stage after
+    /// staging, fairing halves, plumes, exhaust trail, legs and grid fins. Starship: Super Heavy and Ship, the
+    /// hot-staging flash, and the tower's arms closing around the returning booster. Attitude follows the guidance
+    /// with a finite turn rate, so the booster visibly flips after separation.
     /// </summary>
     [DefaultExecutionOrder(0)]
     public sealed class RocketView : MonoBehaviour
@@ -31,6 +32,10 @@ namespace Spaced
         MaterialPropertyBlock _block;
 
         double3 _boosterAxis, _secondAxis;
+        bool _starship;
+        // Vehicle geometry (metres along the stack) and plume sizes (nozzle-cluster radius, sea-level length).
+        float _secondBase, _boosterCenter, _upperCenter, _stackCenter, _lightHeight;
+        float _boosterPlumeRadius, _boosterPlumeLength, _secondPlumeRadius, _secondPlumeLength;
         float _legs01, _fins01;
         bool _fairingsDetached;
 
@@ -51,6 +56,45 @@ namespace Spaced
             _fx = fx;
             _block = new MaterialPropertyBlock();
             _boosterAxis = _secondAxis = math.normalize(flight.Position);
+            _starship = flight.Vehicle.Kind == VehicleKind.Starship;
+            if (_starship) InitStarship(flight, site, materials, fx);
+            else InitFalcon(site, materials, fx);
+            Fx.SetLayer(gameObject);
+        }
+
+        void InitStarship(RocketFlight flight, LaunchSiteView site, MaterialLibrary materials, Fx fx)
+        {
+            _secondBase = StarshipModels.ShipBase;
+            _boosterCenter = 36f;
+            _upperCenter = 26f;
+            _stackCenter = 60f;
+            _lightHeight = 45f;
+            _boosterPlumeRadius = 4.2f; _boosterPlumeLength = 70f;
+            _secondPlumeRadius = 2.6f; _secondPlumeLength = 45f;
+
+            _booster = Part("Super Heavy", StarshipModels.SuperHeavy(), materials, transform);
+            _boosterPlume = fx.CreatePlume(_booster, Vector3.zero, "Super Heavy Plume");
+            _second = Part("Ship", StarshipModels.Ship(), materials, transform);
+            _secondPlume = fx.CreatePlume(_second, Vector3.zero, "Ship Plume");
+
+            var emitter = new GameObject("Trail Emitter").transform;
+            emitter.SetParent(_booster, false);
+            emitter.localPosition = Vector3.down * 10f;
+            _trail = fx.CreateSmoke(emitter, site.Frame, fx.FlameSmoke, 18f, 32f, 60f, 5000, new Color(0.92f, 0.92f, 0.92f, 0.85f), 8f);
+            // Hot staging: the Ship lights while still on the booster, blasting through the vented ring.
+            _coldGas = fx.CreateBurst(_booster, Vector3.up * (StarshipModels.BoosterLength - 0.5f), site.Frame, 9f, 3.5f, 45f, 600, new Color(1f, 0.82f, 0.6f, 0.95f), 5f, 4.8f);
+            _vaporCone = fx.CreateBurst(_booster, Vector3.up * 60f, null, 9f, 0.35f, 6f, 900, new Color(1f, 1f, 1f, 0.55f), 2.2f, 5.5f);
+        }
+
+        void InitFalcon(LaunchSiteView site, MaterialLibrary materials, Fx fx)
+        {
+            _secondBase = RocketModels.SecondStageBase;
+            _boosterCenter = 22f;
+            _upperCenter = 7f;
+            _stackCenter = 35f;
+            _lightHeight = 30f;
+            _boosterPlumeRadius = 1.9f; _boosterPlumeLength = 34f;
+            _secondPlumeRadius = 1.55f; _secondPlumeLength = 30f;
 
             _booster = Part("Booster", RocketModels.Booster(), materials, transform);
             for (int i = 0; i < 4; i++)
@@ -95,7 +139,6 @@ namespace Spaced
             // condensation collar that forms around the vehicle as it goes transonic near max-Q.
             _coldGas = fx.CreateBurst(_booster, Vector3.up * 44.5f, site.Frame, 1.6f, 1.6f, 22f, 400, new Color(1f, 1f, 1f, 0.9f), 5f, 1.9f);
             _vaporCone = fx.CreateBurst(_booster, Vector3.up * 40f, null, 4.5f, 0.35f, 4f, 900, new Color(1f, 1f, 1f, 0.55f), 2.2f, 2.6f);
-            Fx.SetLayer(gameObject);
         }
 
         public void AttachDroneship(DroneshipView droneship) => _droneship = droneship;
@@ -113,18 +156,20 @@ namespace Spaced
         }
 
         /// <summary>Where the camera should look at the booster or the upper stage (inertial km).</summary>
-        public double3 BoosterCenterKm => BoosterBaseM() / 1000.0 + _boosterAxis * 0.022;
-        public double3 UpperStageCenterKm => SecondBaseM() / 1000.0 + _secondAxis * 0.007;
-        public double3 StackCenterKm => _flight.BoosterAttached ? _flight.RenderPosition / 1000.0 + _boosterAxis * 0.035 : UpperStageCenterKm;
+        public double3 BoosterCenterKm => BoosterBaseM() / 1000.0 + _boosterAxis * (_boosterCenter / 1000.0);
+        public double3 UpperStageCenterKm => SecondBaseM() / 1000.0 + _secondAxis * (_upperCenter / 1000.0);
+        public double3 StackCenterKm => _flight.BoosterAttached ? _flight.RenderPosition / 1000.0 + _boosterAxis * (_stackCenter / 1000.0) : UpperStageCenterKm;
         public bool BoosterVisible => _flight.Booster != null || _flight.BoosterAttached;
 
         /// <summary>Camera on the second stage just above the interstage, looking back down the vehicle.</summary>
-        public CameraPose? SecondStageOnboard => Onboard(_second, SecondBaseM(), _secondAxis, 9.0, 2.15);
+        public CameraPose? SecondStageOnboard => _starship
+            ? Onboard(_second, SecondBaseM(), _secondAxis, 20.0, 5.3)
+            : Onboard(_second, SecondBaseM(), _secondAxis, 9.0, 2.15);
 
         /// <summary>Camera on the booster's interstage looking down past the legs (the landing view).</summary>
         public CameraPose? BoosterOnboard => _flight.Booster != null && _flight.Booster.Phase == BoosterPhase.Lost
             ? (CameraPose?)null
-            : Onboard(_booster, BoosterBaseM(), _boosterAxis, 44.0, 2.1);
+            : _starship ? Onboard(_booster, BoosterBaseM(), _boosterAxis, 66.0, 5.2) : Onboard(_booster, BoosterBaseM(), _boosterAxis, 44.0, 2.1);
 
         CameraPose? Onboard(Transform part, double3 baseEciM, double3 axisEci, double height, double outward)
         {
@@ -148,8 +193,8 @@ namespace Spaced
         }
 
         double3 SecondBaseM() => _flight.BoosterAttached
-            ? _flight.RenderPosition + _boosterAxis * RocketModels.SecondStageBase
-            : _flight.RenderPosition + _secondAxis * RocketModels.SecondStageBase;
+            ? _flight.RenderPosition + _boosterAxis * _secondBase
+            : _flight.RenderPosition + _secondAxis * _secondBase;
 
         void LateUpdate()
         {
@@ -182,24 +227,35 @@ namespace Spaced
             _booster.gameObject.SetActive(booster == null || booster.Phase != BoosterPhase.Lost);
             Place(_second, SecondBaseM(), _secondAxis);
 
-            UpdateFairings();
-            _payload.gameObject.SetActive(!_flight.FairingAttached && _flight.PayloadAttached);
+            if (!_starship)
+            {
+                UpdateFairings();
+                _payload.gameObject.SetActive(!_flight.FairingAttached && _flight.PayloadAttached);
+            }
 
             // Plumes.
             double boosterAltitude = booster != null ? booster.AltitudeM : _flight.AltitudeKm * 1000.0;
             double boosterDensity = Atmosphere.Density(boosterAltitude / 1000.0);
             if (_flight.BoosterAttached)
-                _fx.UpdatePlume(_boosterPlume, 1.9f, boosterDensity, _flight.EnginesLit > 0 ? _flight.Throttle : 0, 34f);
+                _fx.UpdatePlume(_boosterPlume, _boosterPlumeRadius, boosterDensity, _flight.EnginesLit > 0 ? _flight.Throttle : 0, _boosterPlumeLength);
             else if (booster != null)
-                _fx.UpdatePlume(_boosterPlume, booster.EnginesLit >= 3 ? 1.3f : 0.55f, boosterDensity, booster.EnginesLit > 0 ? booster.Throttle : 0, booster.EnginesLit >= 3 ? 26f : 14f);
+            {
+                // The returning booster runs a part of its engines: the plume shrinks with the engine count.
+                float share = Mathf.Sqrt(booster.EnginesLit / (float)_flight.Vehicle.BoosterEngines);
+                _fx.UpdatePlume(_boosterPlume, Mathf.Max(_boosterPlumeRadius * share, 0.55f), boosterDensity, booster.EnginesLit > 0 ? booster.Throttle : 0,
+                    Mathf.Max(_boosterPlumeLength * Mathf.Sqrt(share), 14f));
+            }
             else
-                _fx.UpdatePlume(_boosterPlume, 1.9f, 0, 0, 0);
+                _fx.UpdatePlume(_boosterPlume, _boosterPlumeRadius, 0, 0, 0);
 
             bool secondFiring = !_flight.BoosterAttached && _flight.EnginesLit > 0;
-            _fx.UpdatePlume(_secondPlume, 1.55f, Atmosphere.Density(_flight.AltitudeKm), secondFiring ? _flight.Throttle : 0, 30f);
-            // The niobium nozzle extension glows red-orange while it fires.
-            _block.SetVector(Emission, secondFiring ? new Vector4(2.2f, 0.55f, 0.12f, 1f) : Vector4.zero);
-            _nozzle.SetPropertyBlock(_block);
+            _fx.UpdatePlume(_secondPlume, _secondPlumeRadius, Atmosphere.Density(_flight.AltitudeKm), secondFiring ? _flight.Throttle : 0, _secondPlumeLength);
+            if (_nozzle != null)
+            {
+                // The niobium nozzle extension glows red-orange while it fires.
+                _block.SetVector(Emission, secondFiring ? new Vector4(2.2f, 0.55f, 0.12f, 1f) : Vector4.zero);
+                _nozzle.SetPropertyBlock(_block);
+            }
 
             // Exhaust trail: thick near the ground, gone above ~40 km.
             float throttle = _flight.BoosterAttached ? (float)_flight.Throttle * (_flight.EnginesLit > 0 ? 1 : 0)
@@ -212,18 +268,26 @@ namespace Spaced
             _site.SetStrongback(Mathf.InverseLerp(-55f, -40f, t));
             _site.Steam(t > -3f && t < 14f ? 220f : t >= 14f && t < 25f ? 40f : 0f, warp);
 
-            // Landing: legs out, deck spray during the landing burn.
+            // Landing: legs out, deck spray during the landing burn; at Starbase the arms wait for the booster.
             if (booster != null)
             {
                 _fins01 = Mathf.MoveTowards(_fins01, booster.GridFinsDeployed ? 1f : 0f, (float)dt * 0.8f);
                 _legs01 = Mathf.MoveTowards(_legs01, booster.LegsDeployed ? 1f : 0f, (float)dt * 0.5f);
                 if (_droneship != null)
                     _droneship.Spray(booster.Phase == BoosterPhase.LandingBurn && booster.AltitudeM < 250 ? 200f : 0f, warp);
+                if (_flight.Vehicle.ReturnsToSite)
+                {
+                    float armHeight = (float)_flight.Vehicle.CatchHeightM + StarshipModels.CatchPointHeight - 1.6f;
+                    _site.SetArms(armHeight, booster.Phase == BoosterPhase.Landed ? 1f : 0f);
+                }
             }
-            for (int i = 0; i < 4; i++)
+            if (!_starship)
             {
-                _legs[i].GetChild(0).localRotation = Quaternion.Euler(Mathf.Lerp(0f, 152f, _legs01), 0, 0);
-                _fins[i].GetChild(0).localRotation = Quaternion.Euler(Mathf.Lerp(-90f, 0f, _fins01), 0, 0); // folded up → out
+                for (int i = 0; i < 4; i++)
+                {
+                    _legs[i].GetChild(0).localRotation = Quaternion.Euler(Mathf.Lerp(0f, 152f, _legs01), 0, 0);
+                    _fins[i].GetChild(0).localRotation = Quaternion.Euler(Mathf.Lerp(-90f, 0f, _fins01), 0, 0); // folded up → out
+                }
             }
 
             UpdateEffects(booster, dt);
@@ -231,13 +295,13 @@ namespace Spaced
 
         void UpdateEffects(BoosterDescent booster, double dt)
         {
-            // Puffs at separation and while the booster flips around.
+            // Puffs at separation and while the booster flips around (Starship: the hot-staging blast).
             if (!_flight.BoosterAttached && !_separationPuffed)
             {
                 _separationPuffed = true;
-                _coldGas.Emit(60);
+                _coldGas.Emit(_starship ? 400 : 60);
             }
-            if (booster != null && booster.Phase == BoosterPhase.Coasting && dt > 0)
+            if (!_starship && booster != null && booster.Phase == BoosterPhase.Coasting && dt > 0)
             {
                 double turned = math.acos(math.clamp(math.dot(_lastBoosterAxis, _boosterAxis), -1, 1));
                 if (turned > 1e-4) _coldGas.Emit(Mathf.Clamp((int)(turned * 2000), 1, 6));
@@ -259,7 +323,7 @@ namespace Spaced
             if (_flight == null || _booster == null) return;
             var booster = _flight.Booster;
             var camera = Rig != null ? Rig.Near : null;
-            Vector3 center = _flight.BoosterAttached || booster == null ? _booster.position + _booster.up * 30f : _second.position;
+            Vector3 center = _flight.BoosterAttached || booster == null ? _booster.position + _booster.up * _lightHeight : _second.position;
             Vector3 up = Astro.EciToUnity(math.normalize(_flight.Position));
             Vector3 toCamera = camera != null ? (camera.transform.position - center).normalized : up;
             Vector3 side = Vector3.Cross(up, toCamera);
@@ -272,7 +336,7 @@ namespace Spaced
 
             // Engine glows: bright with nine engines in thick air, dimmer for one engine in vacuum.
             float boosterGlow = 0f, secondGlow = 0f;
-            if (_flight.BoosterAttached) boosterGlow = _flight.EnginesLit > 0 ? (float)_flight.Throttle * 9f : 0f;
+            if (_flight.BoosterAttached) boosterGlow = _flight.EnginesLit > 0 ? (float)_flight.Throttle * (_starship ? 16f : 9f) : 0f;
             else if (booster != null && booster.EnginesLit > 0) boosterGlow = (float)booster.Throttle * (booster.EnginesLit >= 3 ? 6f : 3.5f);
             if (!_flight.BoosterAttached && _flight.EnginesLit > 0) secondGlow = (float)_flight.Throttle * 2.5f;
             Cinematic.SetGlows(_booster.position - _booster.up * 5f, boosterGlow, _second.position - _second.up * 4f, secondGlow);

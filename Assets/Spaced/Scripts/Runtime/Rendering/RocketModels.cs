@@ -147,8 +147,8 @@ namespace Spaced
             var b = new MeshBuilder();
             b.Lathe(Vector3.zero, Vector3.down, profile, 32, Surface.WhitePaint);
             _plume = b.Build("Plume");
-            // The shader stretches it up to ~170 m long and ~70 m wide; keep it from being culled.
-            _plume.Mesh.bounds = new Bounds(new Vector3(0, -90f, 0), new Vector3(160f, 200f, 160f));
+            // The shader stretches it (Super Heavy's up to ~350 m long and ~160 m wide in thin air); keep it from being culled.
+            _plume.Mesh.bounds = new Bounds(new Vector3(0, -200f, 0), new Vector3(400f, 440f, 400f));
             return _plume;
         }
     }

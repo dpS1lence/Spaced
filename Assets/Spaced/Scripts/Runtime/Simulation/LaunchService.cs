@@ -29,6 +29,7 @@ namespace Spaced
     }
 
     /// <summary>One slot of a planned constellation: the orbit a satellite should end up in.</summary>
+    [System.Serializable]
     public struct OrbitSlot
     {
         public OrbitElements Elements;

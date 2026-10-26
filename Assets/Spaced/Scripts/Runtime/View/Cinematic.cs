@@ -11,6 +11,12 @@ namespace Spaced
         /// <summary>Set each frame by the launch manager: a launch is being watched with cinematic mode on.</summary>
         public static bool Active;
 
+        /// <summary>
+        /// Set each frame by the lunar mission manager: a Moon mission is being followed (or the camera is out near
+        /// the Moon), so the Earth-orbit satellites aren't drawn and the simulation runs them in coarser steps.
+        /// </summary>
+        public static bool SatellitesHidden;
+
         static readonly int KeyLight = Shader.PropertyToID("_SpacedKeyLight");
         static readonly int KeyLightColor = Shader.PropertyToID("_SpacedKeyLightColor");
         static readonly int Glow0 = Shader.PropertyToID("_SpacedGlow0");

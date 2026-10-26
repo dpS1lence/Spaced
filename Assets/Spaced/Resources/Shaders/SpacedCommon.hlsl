@@ -12,6 +12,9 @@ float _SpacedCloudFade;
 float3 _SpacedEarthCenterLocal;
 float _SpacedEarthRadiusLocal;
 float _SpacedCamEarthCLocal;
+// The Moon in the local scene (metres from the floating origin), for moonlight and its shadow.
+float3 _SpacedMoonCenterLocal;
+float _SpacedMoonRadiusLocal;
 
 // Cinematic lights for the local scene, set while a launch is being watched:
 // a key light (pad floodlights / camera fill) and two engine glows (booster and second stage).
@@ -148,7 +151,10 @@ float3 SpacedLighting(float3 albedo, float metallic, float smoothness, float3 n,
     float altitude = radius - _SpacedEarthRadiusLocal;
     float3 l = _SpacedSunDir;
 
-    float shadow = SpacedEarthShadow(fromCenter, _SpacedEarthRadiusLocal);
+    float3 fromMoon = positionWS - _SpacedMoonCenterLocal;
+    float moonDistance = length(fromMoon);
+    float3 upMoon = fromMoon / max(moonDistance, 1.0);
+    float shadow = SpacedEarthShadow(fromCenter, _SpacedEarthRadiusLocal) * SpacedEarthShadow(fromMoon, _SpacedMoonRadiusLocal);
     float ndl = saturate(dot(n, l));
 
     float roughness = max(0.04, (1.0 - smoothness) * (1.0 - smoothness));
@@ -170,9 +176,16 @@ float3 SpacedLighting(float3 albedo, float metallic, float smoothness, float3 n,
     if (altitude < 60000.0) sunColor *= lerp(float3(1.0, 0.45, 0.2), float3(1, 1, 1), saturate(sunElevation * 4.0 + 0.1));
     float3 color = (diffuse * PI + specular * PI) * sunColor * ndl * shadow;
 
-    // Earthshine: light reflected off the sunlit planet below.
+    // Earthshine: light reflected off the sunlit planet below. It falls off with the Earth's size in the sky, but
+    // stays noticeable all the way to the Moon (from there the Earth is four times the size of a full moon).
     float dayBelow = saturate(sunElevation + 0.3);
-    color += albedo * float3(0.30, 0.38, 0.50) * 0.35 * saturate(-dot(n, up) * 0.5 + 0.5) * dayBelow;
+    float earthSize = max(saturate(_SpacedEarthRadiusLocal * _SpacedEarthRadiusLocal / (radius * radius) * 40.0), 0.14);
+    color += albedo * float3(0.30, 0.38, 0.50) * 0.35 * earthSize * saturate(-dot(n, up) * 0.5 + 0.5) * dayBelow;
+
+    // Moonshine: grey light off the sunlit Moon when you're near it (in lunar orbit, on the surface).
+    float moonSize = saturate(_SpacedMoonRadiusLocal * _SpacedMoonRadiusLocal / max(moonDistance * moonDistance, 1.0) * 1.3);
+    float moonDay = saturate(dot(upMoon, l) + 0.25);
+    color += albedo * float3(0.52, 0.50, 0.47) * 0.30 * moonSize * moonDay * saturate(-dot(n, upMoon) * 0.5 + 0.5);
 
     // Blue sky light inside the atmosphere.
     float atmosphere = saturate(1.0 - altitude / 40000.0);
@@ -186,7 +199,11 @@ float3 SpacedLighting(float3 albedo, float metallic, float smoothness, float3 n,
         color += fresnel * pow(saturate(dot(n, hk)), 2.0 / max(a2, 0.002)) * _SpacedKeyLightColor * _SpacedKeyLight.w * 0.25;
     }
 
-    color += albedo * 0.015;
+    // Fill light from the camera's side so a craft in shadow still shows its shape, as in spaceflight footage
+    // shot with a bit of exposure to spare. Kept faint on and near the ground, where night should stay night.
+    float inSpace = saturate((altitude - 100000.0) / 2000000.0);
+    float fill = lerp(0.015, 0.17, inSpace);
+    color += albedo * float3(0.86, 0.90, 1.0) * fill * (0.35 + 0.65 * saturate(dot(n, v)));
     return color;
 }
 

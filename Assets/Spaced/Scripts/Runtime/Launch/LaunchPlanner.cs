@@ -5,9 +5,6 @@ namespace Spaced
     /// <summary>Launch geometry and performance: target planes, launch windows and payload capacity.</summary>
     public static class LaunchPlanner
     {
-        /// <summary>Gravity, drag and steering losses on the way to orbit (calibrated against <see cref="RocketFlight"/>).</summary>
-        public const double AscentLossesMs = 1580;
-
         /// <summary>Unit normal of an orbit plane (direction of angular momentum) in the inertial frame.</summary>
         public static double3 PlaneNormal(double inclinationRad, double raanRad) => new double3(
             math.sin(inclinationRad) * math.sin(raanRad),
@@ -75,20 +72,27 @@ namespace Spaced
             return bestJd; // inclination below the site latitude: closest approach instead
         }
 
-        /// <summary>Largest payload (kg) Falcon 9 can put into a circular orbit, with booster recovery.</summary>
-        public static double MaxPayloadKg(LaunchSite site, double altitudeKm, double inclinationDeg)
+        /// <summary>
+        /// Largest payload (kg) the vehicle can put into a circular orbit (with its booster recovered unless it is
+        /// the expendable variant). Gravity, drag and steering losses are calibrated against <see cref="RocketFlight"/>.
+        /// </summary>
+        public static double MaxPayloadKg(LaunchVehicle vehicle, LaunchSite site, double altitudeKm, double inclinationDeg)
         {
-            double required = RequiredDeltaV(site, altitudeKm, inclinationDeg);
-            double lo = 0, hi = 30000;
+            double required = RequiredDeltaV(vehicle, site, altitudeKm, inclinationDeg);
+            double lo = 0, hi = vehicle.MaxPayloadSearchKg;
             for (int k = 0; k < 40; k++)
             {
                 double mid = 0.5 * (lo + hi);
-                if (AvailableDeltaV(mid) >= required) lo = mid; else hi = mid;
+                if (AvailableDeltaV(vehicle, mid) >= required) lo = mid; else hi = mid;
             }
             return lo;
         }
 
-        static double RequiredDeltaV(LaunchSite site, double altitudeKm, double inclinationDeg)
+        /// <summary>Speed the upper stage has left after reaching a 200 km parking orbit with this payload (m/s).</summary>
+        public static double DeltaVLeftInParkingOrbit(LaunchVehicle vehicle, LaunchSite site, double inclinationDeg, double payloadKg) =>
+            AvailableDeltaV(vehicle, payloadKg) - RequiredDeltaV(vehicle, site, 200, inclinationDeg);
+
+        static double RequiredDeltaV(LaunchVehicle vehicle, LaunchSite site, double altitudeKm, double inclinationDeg)
         {
             double mu = EarthConstants.Mu * 1e9;
             double re = EarthConstants.RadiusKm * 1000.0;
@@ -98,7 +102,7 @@ namespace Spaced
             double ratio = math.clamp(math.cos(inclinationDeg * MathConst.Deg2Rad) / math.cos(site.LatitudeDeg * MathConst.Deg2Rad), -1, 1);
             double rotationGain = EarthConstants.RotationRate * re * math.cos(site.LatitudeDeg * MathConst.Deg2Rad) * ratio;
 
-            double dv = math.sqrt(mu / insertion) + AscentLossesMs - rotationGain;
+            double dv = math.sqrt(mu / insertion) + vehicle.AscentLossesMs - rotationGain;
             if (target > insertion + 1)
             {
                 double a = 0.5 * (insertion + target);
@@ -109,13 +113,13 @@ namespace Spaced
             return dv;
         }
 
-        static double AvailableDeltaV(double payloadKg)
+        static double AvailableDeltaV(LaunchVehicle v, double payloadKg)
         {
-            double upper = Falcon9.SecondDryKg + Falcon9.SecondPropKg + payloadKg;
-            double liftoff = upper + Falcon9.FairingKg + Falcon9.BoosterDryKg + Falcon9.BoosterPropKg;
-            double meco = liftoff - (Falcon9.BoosterPropKg - Falcon9.LandingReserveKg);
-            double first = 300.0 * Falcon9.G0 * math.log(liftoff / meco);
-            double second = Falcon9.SecondIsp * Falcon9.G0 * math.log((upper + 0.5 * Falcon9.FairingKg) / (Falcon9.SecondDryKg + payloadKg));
+            double upper = v.SecondDryKg + v.SecondPropKg + payloadKg;
+            double liftoff = upper + v.FairingKg + v.BoosterDryKg + v.BoosterPropKg;
+            double meco = liftoff - (v.BoosterPropKg - v.LandingReserveKg);
+            double first = v.FirstStageEffectiveIsp * LaunchVehicle.G0 * math.log(liftoff / meco);
+            double second = v.SecondIsp * LaunchVehicle.G0 * math.log((upper + 0.5 * v.FairingKg) / (v.SecondDryKg + payloadKg));
             return first + second;
         }
     }

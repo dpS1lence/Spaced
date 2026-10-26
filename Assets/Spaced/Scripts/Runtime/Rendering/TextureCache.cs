@@ -9,7 +9,8 @@ namespace Spaced
     /// <summary>Downloads an image once, keeps it under persistentDataPath, and loads it as a texture.</summary>
     public static class TextureCache
     {
-        public static IEnumerator Load(string url, Action<Texture2D> onLoaded)
+        /// <param name="onBytes">Also hands over the raw file (for reading pixels on the CPU), if given.</param>
+        public static IEnumerator Load(string url, Action<Texture2D> onLoaded, Action<byte[]> onBytes = null)
         {
             string path = Path.Combine(Application.persistentDataPath, "textures", Path.GetFileName(new Uri(url).AbsolutePath));
             byte[] bytes = null;
@@ -38,6 +39,7 @@ namespace Spaced
             }
 
             if (bytes == null) yield break;
+            onBytes?.Invoke(bytes);
 
             var texture = new Texture2D(2, 2, TextureFormat.RGBA32, true)
             {

@@ -5,7 +5,7 @@ Shader "Spaced/Moon"
     Properties
     {
         _MainTex ("Albedo", 2D) = "gray" {}
-        _Brightness ("Brightness", Float) = 0.7
+        _Brightness ("Brightness", Float) = 0.95
     }
 
     SubShader
@@ -61,7 +61,11 @@ Shader "Spaced/Moon"
                 float ndl = dot(n, _SpacedSunDir);
                 float lit = saturate(ndl) * (0.75 + 0.25 * saturate(ndl));
                 float3 color = albedo * lit * _SpacedSunIntensity * _Brightness;
-                color += albedo * float3(0.30, 0.38, 0.55) * 0.012;   // earthshine
+                // Earthshine on the night side facing the Earth, as bright as the Earth's phase seen from the Moon
+                // (a nearly full Earth lights up the dark part of a thin crescent), and a little starlight elsewhere.
+                float earthPhase = 0.5 * (1.0 + dot(_SpacedSunDir, _SpacedMoonDir));
+                float facingEarth = saturate(dot(n, -_SpacedMoonDir));
+                color += albedo * float3(0.42, 0.52, 0.72) * (0.28 * earthPhase * facingEarth + 0.11);
                 return half4(color, 1);
             }
             ENDHLSL

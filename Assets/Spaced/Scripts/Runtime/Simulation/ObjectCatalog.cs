@@ -47,6 +47,7 @@ namespace Spaced
         StationKeeping = 1 << 5,
     }
 
+    [Serializable]
     public struct ObjectPhysics
     {
         public float MassKg;
@@ -97,6 +98,8 @@ namespace Spaced
         uint _nextId = 1;
 
         public int Count => Elements.Length;
+        /// <summary>Id the next new object will get (ids are never reused).</summary>
+        public uint NextId => _nextId;
         public int DeadCount { get; private set; }
 
         public ObjectCatalog(int initialCapacity = 32768)
@@ -130,6 +133,37 @@ namespace Spaced
             Ids.Add(id);
             _indexById[id] = index;
             return index;
+        }
+
+        /// <summary>Adds an object from a save file, keeping its id.</summary>
+        public int AddRestored(in OrbitElements elements, ObjectPhysics physics, in OrbitManeuver maneuver, string name, int noradId, int group, uint id)
+        {
+            int index = Add(elements, physics, name, noradId, group);
+            _indexById.Remove(Ids[index]);
+            Ids[index] = id;
+            _indexById[id] = index;
+            Maneuvers[index] = maneuver;
+            return index;
+        }
+
+        public void SetNextId(uint id) => _nextId = math.max(_nextId, id);
+
+        /// <summary>Removes every object (before loading a save).</summary>
+        public void Clear()
+        {
+            Elements.Clear();
+            Physics.Clear();
+            Maneuvers.Clear();
+            PositionsKm.Clear();
+            VelocitiesKmS.Clear();
+            RenderData.Clear();
+            Names.Clear();
+            NoradIds.Clear();
+            Groups.Clear();
+            Ids.Clear();
+            _indexById.Clear();
+            DeadCount = 0;
+            _nextId = 1;
         }
 
         public int IndexOf(uint id) => _indexById.TryGetValue(id, out int index) ? index : -1;

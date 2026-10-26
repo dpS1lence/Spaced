@@ -30,6 +30,13 @@ namespace Spaced
 
         public void Faster() => WarpIndex = Math.Min(WarpIndex + 1, WarpSteps.Length - 1);
         public void Slower() => WarpIndex = Math.Max(WarpIndex - 1, 0);
+        /// <summary>Sets the time directly (loading a save); nothing is propagated across the change.</summary>
+        public void SetTime(double julianDate)
+        {
+            JulianDate = julianDate;
+            _pendingJumpSeconds = 0;
+        }
+
         public void SetWarpIndex(int index) => WarpIndex = Math.Max(0, Math.Min(index, WarpSteps.Length - 1));
 
         /// <summary>Jumps to the given time on the next <see cref="Tick"/>; objects are propagated across the gap.</summary>

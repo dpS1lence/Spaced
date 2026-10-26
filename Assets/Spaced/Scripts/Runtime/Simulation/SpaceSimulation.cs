@@ -6,6 +6,7 @@ using UnityEngine;
 
 namespace Spaced
 {
+    [System.Serializable]
     public struct SimulationStats
     {
         public int CatalogObjects;
@@ -17,6 +18,7 @@ namespace Spaced
         public int Destroyed;
     }
 
+    [System.Serializable]
     public struct SimEvent
     {
         public double JulianDate;
@@ -37,6 +39,8 @@ namespace Spaced
 
         [Tooltip("CelesTrak GP groups to load (see celestrak.org/NORAD/elements).")]
         public string[] CelestrakGroups = DefaultGroups;
+        /// <summary>Download the catalog at start-up (off when a menu decides between a new game and a save).</summary>
+        public bool AutoLoadCatalog = true;
         public bool CollisionsEnabled = true;
         [Tooltip("Real seconds between collision samples. Each sample covers all sim time since the previous one.")]
         public float CollisionSampleInterval = 0.1f;
@@ -93,7 +97,40 @@ namespace Spaced
 
         IEnumerator Start()
         {
+            if (AutoLoadCatalog) yield return DownloadCatalog();
+        }
+
+        /// <summary>Fills the catalog with today's tracked objects from CelesTrak (cached for a couple of hours).</summary>
+        public IEnumerator DownloadCatalog()
+        {
+            if (IsLoaded || _downloading) yield break;
+            _downloading = true;
             yield return _client.FetchGroups(CelestrakGroups, AddCatalogRecords);
+            _downloading = false;
+            IsLoaded = true;
+        }
+
+        bool _downloading;
+
+        public void WriteSave(SaveData data)
+        {
+            FlushPropagation();
+            data.JulianDate = Clock.JulianDate;
+            data.WarpIndex = Clock.WarpIndex;
+            data.Stats = Stats;
+            data.Log.AddRange(Events);
+        }
+
+        /// <summary>Called once the catalog has been read from a save.</summary>
+        public void RestoreSave(SaveData data)
+        {
+            Clock.SetTime(data.JulianDate);
+            Clock.SetWarpIndex(0); // back in real time, whatever the warp was
+            Clock.Paused = false;
+            Stats = data.Stats;
+            Events.Clear();
+            Events.AddRange(data.Log);
+            SelectedId = 0;
             IsLoaded = true;
         }
 
@@ -132,11 +169,21 @@ namespace Spaced
         {
             // After a script reload in Play mode runtime state is gone; stay quiet instead of throwing every frame.
             if (Catalog == null || !Catalog.Elements.IsCreated) return;
-            float realDt = Time.unscaledDeltaTime;
+            // A hitch (loading, a screenshot) mustn't fling time forward at high warp.
+            float realDt = Mathf.Min(Time.unscaledDeltaTime, 0.1f);
             double dt = Clock.Tick(realDt);
             LastDeltaSeconds = dt;
 
-            Propagate(dt);
+            // Nobody is looking at the satellites (out at the Moon): move them a few times a second instead of every
+            // frame, and sample collisions once a second. The elements are analytic, so big steps lose nothing.
+            _pendingPropagation += dt;
+            _propagationTimer -= realDt;
+            if (!Cinematic.SatellitesHidden || _propagationTimer <= 0)
+            {
+                Propagate(_pendingPropagation);
+                _pendingPropagation = 0;
+                _propagationTimer = HiddenPropagationInterval;
+            }
 
             int reentries = Catalog.CollectReentries(_reentryQueue, _reentered);
             if (reentries > 0)
@@ -156,7 +203,8 @@ namespace Spaced
 
             if (dt > 0) _collisionExposureSeconds += dt;
             _collisionTimer += realDt;
-            if (CollisionsEnabled && _collisionTimer >= CollisionSampleInterval && _collisionExposureSeconds > 0)
+            float collisionInterval = Cinematic.SatellitesHidden ? 1f : CollisionSampleInterval;
+            if (CollisionsEnabled && _collisionTimer >= collisionInterval && _collisionExposureSeconds > 0)
             {
                 SampleCollisions(_collisionExposureSeconds);
                 _collisionExposureSeconds = 0;
@@ -173,6 +221,18 @@ namespace Spaced
                 CountCategories();
             }
 
+        }
+
+        const float HiddenPropagationInterval = 0.25f;
+        double _pendingPropagation;
+        float _propagationTimer;
+
+        /// <summary>Brings every object up to the clock (they may lag a fraction of a second while hidden).</summary>
+        public void FlushPropagation()
+        {
+            if (_pendingPropagation == 0 || Catalog == null) return;
+            Propagate(_pendingPropagation);
+            _pendingPropagation = 0;
         }
 
         void Propagate(double dt)

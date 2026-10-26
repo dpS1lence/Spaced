@@ -8,9 +8,11 @@ namespace Spaced
         Lc39A,
         /// <summary>SLC-4E: open pad with only the transporter-erector.</summary>
         Slc4E,
+        /// <summary>Starbase: orbital launch mount and the "Mechazilla" catch tower with its chopstick arms.</summary>
+        Starbase,
     }
 
-    /// <summary>A SpaceX Falcon launch complex.</summary>
+    /// <summary>A SpaceX launch complex, for Falcon 9 or Starship.</summary>
     public sealed class LaunchSite
     {
         public string Name;
@@ -25,6 +27,11 @@ namespace Spaced
         public float FlameTrenchHeadingDeg;
         /// <summary>Distance east to the shoreline, metres (negative = ocean to the west).</summary>
         public float ShorelineOffsetM;
+        public VehicleKind Vehicle = VehicleKind.Falcon9;
+        /// <summary>Height of the launch mount above the site's ground, where the rocket stands (m).</summary>
+        public double MountHeightM;
+
+        public bool Supports(LaunchVehicle vehicle) => vehicle.Kind == Vehicle;
 
         public static readonly LaunchSite[] All =
         {
@@ -49,6 +56,15 @@ namespace Spaced
                 DroneshipName = "Of Course I Still Love You", Style = PadStyle.Slc4E,
                 FlameTrenchHeadingDeg = 200f, ShorelineOffsetM = -2200f,
             },
+            new LaunchSite
+            {
+                Name = "Orbital Launch Pad A, Starbase, Texas", ShortName = "Starbase",
+                LatitudeDeg = 25.99653, LongitudeDeg = -97.15439,
+                DroneshipName = "", Style = PadStyle.Starbase, Vehicle = VehicleKind.Starship, MountHeightM = 20, // SiteModels.StarbaseMountTop
+                FlameTrenchHeadingDeg = 90f, ShorelineOffsetM = 2600f,
+            },
         };
+
+        public static LaunchSite Starbase => All[3];
     }
 }

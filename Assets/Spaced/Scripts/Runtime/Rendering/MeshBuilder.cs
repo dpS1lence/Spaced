@@ -24,6 +24,12 @@ namespace Spaced
         HullPaint,
         Glass,
         WarningLight,
+        /// <summary>Starship's 304L stainless steel.</summary>
+        Stainless,
+        /// <summary>Starship's black hexagonal heat-shield tiles.</summary>
+        HeatTile,
+        /// <summary>Lunar regolith (landing sites).</summary>
+        Regolith,
     }
 
     /// <summary>A mesh whose submeshes map to <see cref="Surface"/>s.</summary>

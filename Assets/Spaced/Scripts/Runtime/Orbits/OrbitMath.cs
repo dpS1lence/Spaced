@@ -7,6 +7,7 @@ namespace Spaced
     /// <see cref="N"/> is kept alongside <see cref="A"/> because SGP4's Brouwer mean motion is not
     /// exactly √(μ/a³); keeping it separate preserves along-track timing for real satellites.
     /// </summary>
+    [System.Serializable]
     public struct OrbitElements
     {
         /// <summary>Semi-major axis, km.</summary>

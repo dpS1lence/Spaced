@@ -69,7 +69,7 @@ namespace Spaced
         {
             if (_sim == null || _sim.Catalog == null || _rig == null) return;
             var catalog = _sim.Catalog;
-            if (catalog.Count == 0) return;
+            if (catalog.Count == 0 || Cinematic.SatellitesHidden) return;
 
             _nearby.Clear();
             new NearbyJob
