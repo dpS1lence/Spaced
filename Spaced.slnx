@@ -1,2 +1,5 @@
 ﻿<Solution>
+  <Project Path="Spaced.Runtime.csproj" />
+  <Project Path="Spaced.Editor.csproj" />
+  <Project Path="Spaced.Tests.Editor.csproj" />
 </Solution>
