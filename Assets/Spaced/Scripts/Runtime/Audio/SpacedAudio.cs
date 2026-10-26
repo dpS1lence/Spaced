@@ -1,13 +1,25 @@
+using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.Networking;
 
 namespace Spaced
 {
+    /// <summary>Background music: one of the synthesised loops, or the player's own files from <see cref="SpacedAudio.MusicFolder"/>.</summary>
+    public enum MusicTrack
+    {
+        Cosmic,
+        Organ,
+        YourMusic,
+    }
+
     /// <summary>
-    /// Music and sound effects, all synthesised at startup (<see cref="Synth"/>).
+    /// Music and sound effects, all synthesised at startup (<see cref="Synth"/>), or music files of your own.
+    /// Volumes and the music choice are remembered between runs.
     /// <para>Rocket roar travels at the speed of sound: from the pad camera ~3 km away you hear liftoff about nine
     /// seconds after you see it. There is no sound in vacuum, except what the onboard cameras pick up through the
     /// structure.</para>
@@ -20,6 +32,19 @@ namespace Spaced
         public float MusicVolume = 0.35f;
         public float EffectsVolume = 0.8f;
         public bool Muted;
+        public MusicTrack Track = MusicTrack.Cosmic;
+
+        /// <summary>Drop .mp3, .ogg or .wav files here to hear them with "Your music".</summary>
+        public static string MusicFolder => Path.Combine(Application.persistentDataPath, "Music");
+        /// <summary>Your music: the file playing now (empty if none), and how many there are.</summary>
+        public string NowPlaying { get; private set; } = "";
+        public int YourMusicCount { get; private set; }
+
+        const string PrefMusic = "Spaced.MusicVolume", PrefEffects = "Spaced.EffectsVolume", PrefMuted = "Spaced.Muted", PrefTrack = "Spaced.MusicTrack";
+        float _savedMusic, _savedEffects;
+        bool _savedMuted;
+        MusicTrack _savedTrack;
+        float _saveAt = -1;
 
         SpaceSimulation _sim;
         CameraRig _rig;
@@ -29,8 +54,16 @@ namespace Spaced
         AudioSource _music, _roar, _effects;
         AudioLowPassFilter _roarFilter;
         AudioClip _boom, _thunk, _thunkLow, _hiss, _click, _tick, _chime, _shutter;
-        Task<float[]> _musicTask;
-        bool _musicStarted;
+        readonly Dictionary<MusicTrack, Task<float[]>> _renders = new Dictionary<MusicTrack, Task<float[]>>();
+        readonly Dictionary<MusicTrack, AudioClip> _loops = new Dictionary<MusicTrack, AudioClip>();
+        MusicTrack _playing = (MusicTrack)(-1);
+        float _fade = 1f;
+        // Your music: a shuffled playlist, loaded one file at a time.
+        readonly List<string> _playlist = new List<string>();
+        int _playlistIndex = -1;
+        bool _loadingFile;
+        float _nextScanAt;
+        AudioClip _fileClip;
 
         // Thrust history of the watched flight, keyed by mission time, for the sound delay.
         readonly List<(double time, float level)> _thrustHistory = new List<(double, float)>();
@@ -65,9 +98,182 @@ namespace Spaced
             _chime = Clip("Chime", Synth.Chime(), 1);
             _shutter = Clip("Shutter", Synth.Shutter(), 1);
 
-            // The music takes a second or two to render; do it off the main thread.
-            _musicTask = Task.Run(() => Synth.AmbientMusic());
+            LoadSettings();
+            // The loops take a second or two to render; do it off the main thread, the chosen one first.
+            Render(Track == MusicTrack.YourMusic ? MusicTrack.Cosmic : Track);
             fleet.ImageCaptured += _ => Play(_shutter, 0.7f);
+        }
+
+        // ───────────────────────────── Settings ─────────────────────────────
+
+        void LoadSettings()
+        {
+            MusicVolume = Mathf.Clamp01(PlayerPrefs.GetFloat(PrefMusic, MusicVolume));
+            EffectsVolume = Mathf.Clamp01(PlayerPrefs.GetFloat(PrefEffects, EffectsVolume));
+            Muted = PlayerPrefs.GetInt(PrefMuted, Muted ? 1 : 0) == 1;
+            Track = (MusicTrack)Mathf.Clamp(PlayerPrefs.GetInt(PrefTrack, (int)Track), 0, (int)MusicTrack.YourMusic);
+            _savedMusic = MusicVolume;
+            _savedEffects = EffectsVolume;
+            _savedMuted = Muted;
+            _savedTrack = Track;
+        }
+
+        /// <summary>Remembers changed settings, written to disk a moment after the last change (sliders change every frame).</summary>
+        void SaveSettingsIfChanged()
+        {
+            if (MusicVolume != _savedMusic || EffectsVolume != _savedEffects || Muted != _savedMuted || Track != _savedTrack)
+            {
+                _savedMusic = MusicVolume;
+                _savedEffects = EffectsVolume;
+                _savedMuted = Muted;
+                _savedTrack = Track;
+                PlayerPrefs.SetFloat(PrefMusic, MusicVolume);
+                PlayerPrefs.SetFloat(PrefEffects, EffectsVolume);
+                PlayerPrefs.SetInt(PrefMuted, Muted ? 1 : 0);
+                PlayerPrefs.SetInt(PrefTrack, (int)Track);
+                _saveAt = Time.unscaledTime + 1f;
+            }
+            if (_saveAt > 0 && Time.unscaledTime >= _saveAt)
+            {
+                _saveAt = -1;
+                PlayerPrefs.Save();
+            }
+        }
+
+        void OnApplicationQuit()
+        {
+            SaveSettingsIfChanged();
+            PlayerPrefs.Save();
+        }
+
+        // ───────────────────────────── Music ─────────────────────────────
+
+        void Render(MusicTrack track)
+        {
+            if (track == MusicTrack.YourMusic || _renders.ContainsKey(track)) return;
+            _renders[track] = Task.Run(() => track == MusicTrack.Organ ? Synth.OrganMusic() : Synth.AmbientMusic());
+        }
+
+        /// <summary>Plays the next file of your music (rescanning the folder), or lists none.</summary>
+        public void NextTrack()
+        {
+            if (Track != MusicTrack.YourMusic) return;
+            ScanMusicFolder(false);
+            if (_playlist.Count == 0) return;
+            _playlistIndex = (_playlistIndex + 1) % _playlist.Count;
+            StartCoroutine(LoadFile(_playlist[_playlistIndex]));
+        }
+
+        /// <summary>Opens the music folder in Explorer (creating it first).</summary>
+        public void OpenMusicFolder()
+        {
+            Directory.CreateDirectory(MusicFolder);
+            Application.OpenURL(new System.Uri(MusicFolder).AbsoluteUri);
+        }
+
+        void ScanMusicFolder(bool shuffle)
+        {
+            var files = new List<string>();
+            try
+            {
+                Directory.CreateDirectory(MusicFolder);
+                foreach (var file in Directory.GetFiles(MusicFolder))
+                {
+                    string ext = Path.GetExtension(file).ToLowerInvariant();
+                    if (ext == ".mp3" || ext == ".ogg" || ext == ".wav") files.Add(file);
+                }
+            }
+            catch (IOException) { }
+            catch (System.UnauthorizedAccessException) { }
+            files.Sort();
+            YourMusicCount = files.Count;
+            if (files.Count == _playlist.Count && files.TrueForAll(_playlist.Contains)) return;
+            if (shuffle)
+                for (int i = files.Count - 1; i > 0; i--)
+                {
+                    int j = UnityEngine.Random.Range(0, i + 1);
+                    (files[i], files[j]) = (files[j], files[i]);
+                }
+            _playlist.Clear();
+            _playlist.AddRange(files);
+            _playlistIndex = -1;
+        }
+
+        IEnumerator LoadFile(string path)
+        {
+            _loadingFile = true;
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            var type = ext == ".mp3" ? AudioType.MPEG : ext == ".ogg" ? AudioType.OGGVORBIS : AudioType.WAV;
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(new System.Uri(path).AbsoluteUri, type))
+            {
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = true;
+                yield return request.SendWebRequest();
+                _loadingFile = false;
+                if (Track != MusicTrack.YourMusic) yield break;
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogWarning($"Music: couldn't play {Path.GetFileName(path)}: {request.error}");
+                    NowPlaying = $"couldn't play {Path.GetFileName(path)}";
+                    yield break;
+                }
+                var clip = DownloadHandlerAudioClip.GetContent(request);
+                if (_fileClip != null && _fileClip != clip) Destroy(_fileClip);
+                _fileClip = clip;
+                _music.Stop();
+                _music.loop = false;
+                _music.clip = clip;
+                _music.Play();
+                NowPlaying = Path.GetFileNameWithoutExtension(path);
+            }
+        }
+
+        /// <summary>Switches tracks with a short fade, starts loops once rendered, and moves through your music.</summary>
+        void UpdateMusic()
+        {
+            if (Track != _playing)
+            {
+                // Fade out what's playing, then switch.
+                _fade = Mathf.MoveTowards(_fade, 0f, Time.unscaledDeltaTime / 0.8f);
+                if (_fade > 0f && _music.isPlaying) return;
+                _music.Stop();
+                _playing = Track;
+                NowPlaying = "";
+                if (Track == MusicTrack.YourMusic)
+                {
+                    ScanMusicFolder(true);
+                    if (_playlist.Count > 0) NextTrack();
+                }
+            }
+
+            if (_playing == MusicTrack.YourMusic)
+            {
+                // Next file when one ends (not while the window is in the background, when audio may be paused).
+                if (!_loadingFile && !_music.isPlaying && Application.isFocused && Time.unscaledTime >= _nextScanAt)
+                {
+                    _nextScanAt = Time.unscaledTime + 3f; // an empty folder is looked at again every few seconds
+                    NextTrack();
+                }
+            }
+            else if (!_music.isPlaying || _music.clip == null || !_loops.ContainsValue(_music.clip))
+            {
+                Render(_playing);
+                if (_loops.TryGetValue(_playing, out var loop) || TryFinishRender(_playing, out loop))
+                {
+                    _music.loop = true;
+                    _music.clip = loop;
+                    _music.Play();
+                }
+            }
+            _fade = Mathf.MoveTowards(_fade, 1f, Time.unscaledDeltaTime / 0.8f);
+        }
+
+        bool TryFinishRender(MusicTrack track, out AudioClip clip)
+        {
+            clip = null;
+            if (!_renders.TryGetValue(track, out var task) || !task.IsCompleted || task.IsFaulted) return false;
+            clip = Clip(track.ToString(), task.Result, 2);
+            _loops[track] = clip;
+            return true;
         }
 
         AudioSource NewSource(string sourceName, bool loop)
@@ -95,8 +301,9 @@ namespace Spaced
         void Update()
         {
             if (_sim == null) return;
-            StartMusicWhenReady();
-            _music.volume = Muted ? 0 : MusicVolume * (Cinematic.Active ? 0.6f : 1f);
+            UpdateMusic();
+            SaveSettingsIfChanged();
+            _music.volume = Muted ? 0 : MusicVolume * _fade * (Cinematic.Active ? 0.6f : 1f);
 
             // UI clicks.
             var mouse = Mouse.current;
@@ -111,15 +318,6 @@ namespace Spaced
                 Play(_scheduled[i].clip, _scheduled[i].volume);
                 _scheduled.RemoveAt(i);
             }
-        }
-
-        void StartMusicWhenReady()
-        {
-            if (_musicStarted || _musicTask == null || !_musicTask.IsCompleted) return;
-            _musicStarted = true;
-            if (_musicTask.IsFaulted) return;
-            _music.clip = Clip("Ambient", _musicTask.Result, 2);
-            _music.Play();
         }
 
         void UpdateLaunchAudio()

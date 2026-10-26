@@ -206,7 +206,7 @@ namespace Spaced
             return true;
         }
 
-        static List<OrbitSlot> ContractSlots(Contract c) =>
+        public static List<OrbitSlot> ContractSlots(Contract c) =>
             LaunchService.PlanWalker(c.AltitudeKm, c.InclinationDeg, c.Count, math.max(1, c.Planes), c.Planes > 1 ? 1 : 0, 0);
 
         /// <summary>Schedules the launch(es) for an accepted contract and pays for them.</summary>

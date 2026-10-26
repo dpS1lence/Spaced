@@ -43,6 +43,18 @@ Use **Mission Control** to pick a camera yourself (pad, chase, booster, droneshi
 onboard, booster onboard), or **Skip to T-1 min** for later launches. Launches nobody is watching
 at high time warp are resolved in one step: their satellites still appear in the right orbits.
 
+### Seeing the orbit before you launch
+
+While you set up a launch, the globe shows it in green: the orbit (or every plane of a
+constellation) and the ground track over the turning Earth, starting with the rocket's own climb
+and coast from the pad. "Launch now" flights are flown through the same flight simulation in the
+background, so the preview matches where the satellite really ends up. *Track length* sets how many
+orbits to draw, and the other satellites are hidden while you preview so the lines stand out.
+*Liftoff delay* picks a later launch time. The path over the ground stays the same (the pad turns
+with the Earth), but the time of day under the orbit changes, and so does the pad weather. For an
+imaging satellite the panel also says when it would first pass over each of your open imaging
+requests. Contract cards have the same preview.
+
 ## Career
 
 The main menu offers a **career** (the game) and a **sandbox** (everything free). In a career you
@@ -142,13 +154,17 @@ to the next liftoff.
 ## Sound
 
 Every sound is synthesised in code at startup, so there are no audio files and no licences:
-- A soft ambient loop: drifting D-major chords, bell shimmers and reverb.
+- Two music loops. *Cosmic* is a soft ambient loop of drifting D-major chords, bell shimmers and
+  reverb. *Organ* is original pipe-organ music with a ticking ostinato in a big hall, in the spirit of
+  organ-led space film scores.
+- *Your music* plays your own .mp3, .ogg or .wav files, shuffled. **Open music folder** in the Sound
+  window opens the folder (`%USERPROFILE%\AppData\LocalLow\DefaultCompany\Spaced\Music`).
 - Rocket roar that reaches you at the speed of sound, delayed and muffled with distance, and silent
   above the atmosphere except on the onboard cameras.
 - Sonic booms before landing, staging thunks and nitrogen hiss, countdown ticks, a deployment chime, a
   camera shutter and UI clicks.
 
-Volumes are under **Sound** in the top bar.
+Volumes and the music choice are under **Sound** in the top bar, and the game remembers them.
 
 ## Controls
 

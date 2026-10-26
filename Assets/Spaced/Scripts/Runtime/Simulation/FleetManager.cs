@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
@@ -56,6 +57,13 @@ namespace Spaced
         public double RequestedJd;
         public bool Captured;
         public CapturedImage Image;
+        /// <summary>The next daylight pass within reach (clouds aside), or NaN if there's none; see <see cref="FleetManager.NextPass"/>.</summary>
+        public double NextPassJd = double.NaN;
+        public string NextPassSatellite;
+        /// <summary>False until the first pass prediction is done.</summary>
+        public bool PassPredicted;
+        internal float PassPredictedAt = -1e6f;
+        internal Task PassTask;
     }
 
     /// <summary>A picture taken by one of your imaging satellites.</summary>
@@ -265,13 +273,14 @@ namespace Spaced
         /// Takes a picture of the ground under one satellite. Detail follows altitude and camera class, limited by the
         /// 10 m Sentinel-2 source imagery. Over the night side you get a (nearly) black frame, like the real thing.
         /// </summary>
-        public bool Capture(int index, ImagingTarget target = null)
+        public bool Capture(int index, ImagingTarget target = null, double? atJd = null, double3? satEcefKm = null)
         {
             if (_capturing || index < 0) return false;
             var catalog = _sim.Catalog;
             var group = Group(catalog.Groups[index]);
-            double jd = _sim.Clock.JulianDate;
-            double3 satEcef = Astro.EciToEcef(catalog.PositionsKm[index], jd);
+            // A pass found between two frames at high time warp is taken as of its own moment.
+            double jd = atJd ?? _sim.Clock.JulianDate;
+            double3 satEcef = satEcefKm ?? Astro.EciToEcef(catalog.PositionsKm[index], jd);
             Astro.EcefToGeo(satEcef, out double subLat, out double subLon, out double altitude);
             double lat = target?.LatitudeDeg ?? subLat, lon = target?.LongitudeDeg ?? subLon;
             if (math.abs(lat) > 84) return false;
@@ -382,37 +391,152 @@ namespace Spaced
             return target;
         }
 
-        /// <summary>Hands each open target to the first imaging satellite that can see it in daylight right now.</summary>
+        /// <summary>Time step for pass searches: a pass in reach lasts a minute or more even from a low orbit.</summary>
+        const double PassStepSeconds = 20;
+        double _servedJd = double.NaN;
+        readonly List<int> _imagers = new List<int>();
+        readonly List<bool> _clearSky = new List<bool>();
+
+        /// <summary>
+        /// Hands each open target to the first imaging satellite that can see it in daylight under a clear-enough sky.
+        /// At high time warp a satellite crosses a whole pass between two frames, so the time since the last check
+        /// (up to a day) is searched in short steps instead of looking only at "now".
+        /// </summary>
         void ServeTargets()
         {
-            if (_capturing || Targets.Count == 0) return;
-            var catalog = _sim.Catalog;
             double jd = _sim.Clock.JulianDate;
-            double3 sun = Astro.EciToEcef(Astro.SunDirection(jd), jd);
+            if (Targets.Count == 0 || double.IsNaN(_servedJd) || jd < _servedJd) _servedJd = jd;
+            if (_capturing || Targets.Count == 0) return;
+            double from = math.max(_servedJd, jd - 1.0);
+            _servedJd = jd;
+            var sats = ImagingSatellites();
+            if (sats.Count == 0) return;
+
+            _clearSky.Clear();
             foreach (var target in Targets)
+                _clearSky.Add(!target.Captured && (CloudCover?.Invoke(target.LatitudeDeg, target.LongitudeDeg) ?? 0f) <= MaxTargetCloud);
+            if (!_clearSky.Contains(true)) return;
+
+            var catalog = _sim.Catalog;
+            int steps = math.max(1, (int)math.ceil((jd - from) * MathConst.SecondsPerDay / PassStepSeconds));
+            for (int k = 1; k <= steps; k++)
             {
-                if (target.Captured) continue;
-                double3 ground = Astro.GeoToEcef(target.LatitudeDeg, target.LongitudeDeg, 0);
-                if (math.dot(math.normalize(ground), sun) < 0.05) continue; // wait for daylight
-                if ((CloudCover?.Invoke(target.LatitudeDeg, target.LongitudeDeg) ?? 0f) > MaxTargetCloud) continue; // and a clear sky
-                foreach (var group in Groups)
+                double t = from + (jd - from) * k / steps;
+                for (int n = 0; n < Targets.Count; n++)
                 {
-                    if (group.Role != PayloadRole.Imaging || group.Alive == 0) continue;
-                    foreach (uint id in group.MemberIds)
+                    if (!_clearSky[n]) continue;
+                    var target = Targets[n];
+                    double3 ground = Astro.GeoToEcef(target.LatitudeDeg, target.LongitudeDeg, 0);
+                    if (!Daylight(ground, t)) continue;
+                    foreach (int i in sats)
                     {
-                        int i = catalog.IndexOf(id);
-                        if (i < 0 || !catalog.Physics[i].IsAlive) continue;
-                        double3 sat = Astro.EciToEcef(catalog.PositionsKm[i], jd);
-                        double3 toGround = math.normalize(ground - sat);
-                        double offNadir = math.acos(math.clamp(math.dot(math.normalize(-sat), toGround), -1, 1)) * MathConst.Rad2Deg;
-                        // Must be above the target's horizon and within the camera's pointing range.
-                        if (offNadir > MaxOffNadirDeg || math.dot(math.normalize(ground), -toGround) < 0.2) continue;
-                        Capture(i, target);
+                        double3 sat = EcefAt(catalog.Elements[i], jd, t);
+                        if (!InReach(sat, ground, MaxOffNadirDeg)) continue;
+                        Capture(i, target, t, sat);
+                        _servedJd = t; // other targets passed later in this frame are found next frame
                         return;
                     }
                 }
             }
         }
+
+        /// <summary>Catalog indices of your live imaging satellites.</summary>
+        List<int> ImagingSatellites()
+        {
+            _imagers.Clear();
+            var catalog = _sim.Catalog;
+            foreach (var group in Groups)
+            {
+                if (group.Role != PayloadRole.Imaging || group.Alive == 0) continue;
+                foreach (uint id in group.MemberIds)
+                {
+                    int i = catalog.IndexOf(id);
+                    if (i >= 0 && catalog.Physics[i].IsAlive) _imagers.Add(i);
+                }
+            }
+            return _imagers;
+        }
+
+        public bool HasImagingSatellites => _sim != null && _sim.Catalog != null && ImagingSatellites().Count > 0;
+
+        /// <summary>
+        /// When the next daylight pass within reach of a target comes (clouds aside), searched up to
+        /// <paramref name="days"/> ahead on a worker thread and refreshed every few seconds. NaN if there's none.
+        /// </summary>
+        public double NextPass(ImagingTarget target, out string satellite, double days = 14)
+        {
+            satellite = target.NextPassSatellite;
+            double jd = _sim.Clock.JulianDate;
+            bool stale = Time.unscaledTime - target.PassPredictedAt > 10 || (!double.IsNaN(target.NextPassJd) && target.NextPassJd < jd);
+            if (stale && !target.Captured && (target.PassTask == null || target.PassTask.IsCompleted))
+            {
+                target.PassPredictedAt = Time.unscaledTime;
+                var sats = ImagingSatellites();
+                var elements = new OrbitElements[sats.Count];
+                var names = new string[sats.Count];
+                for (int k = 0; k < sats.Count; k++)
+                {
+                    elements[k] = _sim.Catalog.Elements[sats[k]];
+                    names[k] = _sim.Catalog.Names[sats[k]];
+                }
+                double lat = target.LatitudeDeg, lon = target.LongitudeDeg, maxOffNadir = MaxOffNadirDeg;
+                target.PassTask = Task.Run(() =>
+                {
+                    double pass = FindPass(elements, jd, lat, lon, maxOffNadir, days, out int which);
+                    target.NextPassSatellite = which >= 0 ? names[which] : null;
+                    target.NextPassJd = pass;
+                    target.PassPredicted = true;
+                });
+            }
+            return target.NextPassJd;
+        }
+
+        /// <summary>
+        /// First daylight moment within <paramref name="days"/> of <paramref name="nowJd"/> that one of the orbits
+        /// (elements valid at <paramref name="nowJd"/>) has the spot in camera reach; NaN if never. Thread-safe.
+        /// </summary>
+        public static double FindPass(OrbitElements[] sats, double nowJd, double lat, double lon, double maxOffNadirDeg, double days, out int which)
+        {
+            which = -1;
+            double3 ground = Astro.GeoToEcef(lat, lon, 0);
+            double step = PassStepSeconds / MathConst.SecondsPerDay;
+            for (double t = nowJd; t < nowJd + days; t += step)
+            {
+                if (!Daylight(ground, t)) continue;
+                for (int k = 0; k < sats.Length; k++)
+                    if (InReach(EcefAt(sats[k], nowJd, t), ground, maxOffNadirDeg))
+                    {
+                        which = k;
+                        return t;
+                    }
+            }
+            return double.NaN;
+        }
+
+        /// <summary>Earth-fixed position (km) of a satellite at a time near now, drifting its mean elements with J2.</summary>
+        static double3 EcefAt(OrbitElements el, double nowJd, double atJd)
+        {
+            double dt = (atJd - nowJd) * MathConst.SecondsPerDay;
+            if (dt != 0)
+            {
+                OrbitMath.SecularRates(el, out double raanDot, out double argPDot, out double mDot);
+                el.Raan += raanDot * dt;
+                el.ArgP += argPDot * dt;
+                el.M = OrbitMath.WrapAngle(el.M + mDot * dt);
+            }
+            OrbitMath.ToStateVector(el, out double3 eci, out _);
+            return Astro.EciToEcef(eci, atJd);
+        }
+
+        /// <summary>The camera can point at the spot: within its off-nadir range and well above the spot's horizon.</summary>
+        static bool InReach(double3 sat, double3 ground, double maxOffNadirDeg)
+        {
+            double3 toGround = math.normalize(ground - sat);
+            double offNadir = math.acos(math.clamp(math.dot(math.normalize(-sat), toGround), -1, 1)) * MathConst.Rad2Deg;
+            return offNadir <= maxOffNadirDeg && math.dot(math.normalize(ground), -toGround) >= 0.2;
+        }
+
+        static bool Daylight(double3 ground, double jd) => math.dot(math.normalize(ground), Astro.EciToEcef(Astro.SunDirection(jd), jd)) >= 0.05;
 
         public string Save(CapturedImage image)
         {

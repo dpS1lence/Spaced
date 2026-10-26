@@ -105,6 +105,131 @@ namespace Spaced
             return output;
         }
 
+        /// <summary>
+        /// "Cathedral" loop, original music in the spirit of organ-led space film scores: a pipe organ (8', 4', 2⅔',
+        /// 2' ranks with a slow tremulant, 16' pedal) holding four long minor-key chords under a ticking eighth-note
+        /// ostinato, in a big hall. Rendered twice like <see cref="AmbientMusic"/> so the loop is seamless. Stereo.
+        /// </summary>
+        public static float[] OrganMusic(int seconds = 64)
+        {
+            int frames = seconds * SampleRate;
+            int[][] chords =
+            {
+                new[] { 45, 52, 57, 60, 64 },  // Am
+                new[] { 41, 48, 53, 57, 64 },  // Fmaj7
+                new[] { 40, 48, 52, 55, 62 },  // C/E add9
+                new[] { 38, 45, 50, 53, 60 },  // Dm7
+            };
+            // Four-note ticking cells, one per chord, repeated over it.
+            int[][] cells =
+            {
+                new[] { 76, 69, 72, 69 },
+                new[] { 76, 69, 72, 65 },
+                new[] { 74, 67, 72, 67 },
+                new[] { 77, 69, 74, 69 },
+            };
+            double chordLength = seconds / (double)chords.Length;
+            const double step = 0.4, fade = 3.0;
+            int steps = (int)Math.Round(seconds / step);
+
+            float[] organ = Wavetable(new[] { 1.0, 0.55, 0.32, 0.28, 0.12, 0.08 }, new[] { 1, 2, 3, 4, 6, 8 });
+            float[] flute = Wavetable(new[] { 1.0, 0.18, 0.05 }, new[] { 1, 2, 3 });
+            double Loop(double f) => Math.Max(1.0, Math.Round(f * seconds)) / seconds;
+            double tremulantRate = Loop(5.2), swellRate = Loop(1.0 / 32.0);
+
+            var output = new float[frames * 2];
+            var reverbL = new Reverb(0);
+            var reverbR = new Reverb(23);
+            for (int pass = 0; pass < 2; pass++)
+            {
+                for (int i = 0; i < frames; i++)
+                {
+                    double t = i / (double)SampleRate;
+                    double left = 0, right = 0;
+
+                    // Held chords: a plateau with short crossfades, as an organist changes stops and keys.
+                    for (int c = 0; c < chords.Length; c++)
+                    {
+                        double distance = Math.Abs(Wrap(t - (c + 0.5) * chordLength, seconds));
+                        double window = Math.Min(1.0, Math.Max(0.0, (chordLength / 2 + fade / 2 - distance) / fade));
+                        if (window <= 0) continue;
+                        for (int n = 0; n < chords[c].Length; n++)
+                        {
+                            double f = Note(chords[c][n]);
+                            double level = window * (n == 0 ? 0.05 : 0.03) / (1.0 + n * 0.12);
+                            double a = Lookup(organ, Loop(f * 0.999) * t + n * 0.13);
+                            double b = Lookup(organ, Loop(f * 1.001) * t + n * 0.41);
+                            left += level * a;
+                            right += level * b;
+                            if (n == 0)
+                            {
+                                double pedal = Lookup(flute, Loop(f * 0.5) * t) * window * 0.07;
+                                left += pedal;
+                                right += pedal;
+                            }
+                        }
+                    }
+                    double tremulant = 1.0 + 0.05 * Math.Sin(TwoPi * tremulantRate * t);
+                    double swell = 0.8 + 0.2 * Math.Sin(TwoPi * swellRate * t);
+                    left *= tremulant * swell;
+                    right *= tremulant * swell;
+
+                    // Ostinato: flute-stop notes on an eighth-note grid, each ringing on a little; notes struck just
+                    // before the seam ring on into the start.
+                    int current = (int)Math.Floor(t / step);
+                    for (int j = 0; j < 5; j++)
+                    {
+                        int k = current - j;
+                        double dt = t - k * step;
+                        int index = ((k % steps) + steps) % steps;
+                        int chord = Math.Min(chords.Length - 1, (int)(index * step / chordLength));
+                        double f = Note(cells[chord][index % 4]);
+                        double envelope = Math.Min(1.0, dt * 120.0) * Math.Exp(-dt * 2.4) * (index % 4 == 0 ? 1.0 : 0.72);
+                        double v = Lookup(flute, f * dt) * envelope * 0.05;
+                        double pan = index % 2 == 0 ? -0.3 : 0.3;
+                        left += v * (1.0 - pan) * 0.5;
+                        right += v * (1.0 + pan) * 0.5;
+                    }
+
+                    double wetL = reverbL.Process(left), wetR = reverbR.Process(right);
+                    if (pass == 1)
+                    {
+                        output[i * 2] = (float)(left * 0.55 + wetL * 0.8);
+                        output[i * 2 + 1] = (float)(right * 0.55 + wetR * 0.8);
+                    }
+                }
+            }
+            Normalize(output, 0.55f);
+            return output;
+        }
+
+        /// <summary>One cycle of a waveform made of the given harmonics, normalised to ±1 (one extra sample for interpolation).</summary>
+        static float[] Wavetable(double[] amplitudes, int[] harmonics)
+        {
+            const int size = 4096;
+            var table = new float[size + 1];
+            double peak = 1e-9;
+            for (int i = 0; i < size; i++)
+            {
+                double x = TwoPi * i / size, sum = 0;
+                for (int k = 0; k < harmonics.Length; k++) sum += amplitudes[k] * Math.Sin(harmonics[k] * x);
+                table[i] = (float)sum;
+                peak = Math.Max(peak, Math.Abs(sum));
+            }
+            for (int i = 0; i < size; i++) table[i] = (float)(table[i] / peak);
+            table[size] = table[0];
+            return table;
+        }
+
+        /// <summary>Wavetable value at a phase in cycles (any real number), linearly interpolated.</summary>
+        static double Lookup(float[] table, double phase)
+        {
+            phase -= Math.Floor(phase);
+            double x = phase * (table.Length - 1);
+            int i = (int)x;
+            return table[i] + (table[i + 1] - table[i]) * (x - i);
+        }
+
         static double Wrap(double x, double period)
         {
             x %= period;

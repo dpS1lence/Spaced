@@ -27,6 +27,8 @@ namespace Spaced
         public LunarSpacecraft LunarCraft;
         /// <summary>Career contract this campaign fulfils, or -1.</summary>
         public int Contract = -1;
+        /// <summary>No liftoff before this (the player asked for a later launch time).</summary>
+        public double NotBeforeJd;
         public readonly List<LaunchMission> Missions = new List<LaunchMission>();
         public int Deployed;
 
@@ -156,7 +158,7 @@ namespace Spaced
 
         /// <summary>Creates the missions for a set of slots (grouped by plane) and schedules the first one.</summary>
         public LaunchCampaign StartCampaign(string name, LaunchVehicle vehicle, SatelliteClass satClass, bool maneuverable, LaunchSite site,
-            List<OrbitSlot> slots, bool anyPlane, bool watchAll, int group = -1)
+            List<OrbitSlot> slots, bool anyPlane, bool watchAll, int group = -1, double notBeforeJd = 0)
         {
             var first = slots[0].Elements;
             var plan = Plan(vehicle, satClass, site, first.A - EarthConstants.RadiusKm, first.I * MathConst.Rad2Deg, slots.Count);
@@ -176,6 +178,7 @@ namespace Spaced
                 SatellitesPerLaunch = plan.PerLaunch,
                 WatchAll = watchAll,
                 Group = group,
+                NotBeforeJd = notBeforeJd,
             };
 
             // Each mission flies to one plane; big planes take several missions.
@@ -267,13 +270,20 @@ namespace Spaced
             return launches;
         }
 
+        /// <summary>Soonest a new launch could lift off from a pad (it may be busy), plus an optional delay.</summary>
+        public double EarliestLiftoffJd(LaunchSite site, double delayDays = 0)
+        {
+            _padFreeJd.TryGetValue(site, out double padFree);
+            return math.max(_sim.Clock.JulianDate + FirstLaunchLeadMinutes / 1440.0 + delayDays, padFree);
+        }
+
         void ScheduleNext(LaunchCampaign campaign)
         {
             var next = campaign.Missions.Find(m => !m.Scheduled);
             if (next == null) return;
             double now = _sim.Clock.JulianDate;
             _padFreeJd.TryGetValue(campaign.Site, out double padFree);
-            double earliest = math.max(now + FirstLaunchLeadMinutes / 1440.0, padFree);
+            double earliest = math.max(math.max(now + FirstLaunchLeadMinutes / 1440.0, padFree), campaign.NotBeforeJd);
             next.LiftoffJd = campaign.AnyPlane
                 ? earliest
                 : LaunchPlanner.NextLaunchWindow(campaign.Site, next.Plane, campaign.PlanEpochJd, earliest);
@@ -671,13 +681,26 @@ namespace Spaced
             bool raises = mission.AltitudeKm > RocketFlight.PayloadSelfRaiseAboveKm;
             double perigee = raises ? RocketFlight.DirectInsertionMaxKm : mission.AltitudeKm;
 
-            var first = campaign.Slots[mission.SlotIndices[0]].Elements;
-            if (!campaign.AnyPlane) OrbitMath.Advance(ref first, 0, (jd - campaign.PlanEpochJd) * MathConst.SecondsPerDay);
-            double argLat = campaign.AnyPlane ? 0 : (first.ArgP + first.M) * MathConst.Rad2Deg;
-
-            var stage = OrbitMath.FromAltitudes(perigee, mission.AltitudeKm, inclination, raan, 0, argLat);
-            OrbitMath.ToStateVector(stage, out double3 positionKm, out double3 velocityKmS);
-            DeployPayload(mission, jd, positionKm, velocityKmS, 0, raises);
+            // "Launch now" flights are flown through the flight simulation (remembered from the launch preview), so the
+            // satellites end up exactly where a watched launch would have put them.
+            var slot = mission.Plane;
+            var path = campaign.AnyPlane
+                ? LaunchPreview.Fly(campaign.Vehicle, campaign.Site, mission.PayloadKg, slot.PerigeeAltitudeKm, slot.ApogeeAltitudeKm,
+                    slot.I * MathConst.Rad2Deg, mission.LiftoffJd)
+                : null;
+            if (path != null)
+            {
+                DeployPayload(mission, jd, path.ReleasePositionKm, path.ReleaseVelocityKmS, (jd - path.ReleaseJd) * MathConst.SecondsPerDay, path.RaisesOrbit);
+            }
+            else
+            {
+                var first = campaign.Slots[mission.SlotIndices[0]].Elements;
+                if (!campaign.AnyPlane) OrbitMath.Advance(ref first, 0, (jd - campaign.PlanEpochJd) * MathConst.SecondsPerDay);
+                double argLat = campaign.AnyPlane ? 0 : (first.ArgP + first.M) * MathConst.Rad2Deg;
+                var stage = OrbitMath.FromAltitudes(perigee, mission.AltitudeKm, inclination, raan, 0, argLat);
+                OrbitMath.ToStateVector(stage, out double3 positionKm, out double3 velocityKmS);
+                DeployPayload(mission, jd, positionKm, velocityKmS, 0, raises);
+            }
             if (!wasFlying) ScheduleNext(campaign);
             _sim.Log($"{mission.Name}: launched from {campaign.Site.ShortName} and deployed {mission.SlotIndices.Count} satellites (fast-forwarded)");
         }

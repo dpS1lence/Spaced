@@ -66,7 +66,7 @@ namespace Spaced
             if (_sim == null || _sim.Catalog == null || _material == null) return;
             var catalog = _sim.Catalog;
             // While hidden only the markers (Moon, spacecraft) are drawn.
-            int count = Cinematic.SatellitesHidden ? 0 : catalog.Count;
+            int count = Cinematic.SatellitesHidden || Cinematic.PreviewHidesSatellites ? 0 : catalog.Count;
             if (_material == null) return;
 
             if (count > 0)

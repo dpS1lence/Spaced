@@ -199,10 +199,11 @@ float3 SpacedLighting(float3 albedo, float metallic, float smoothness, float3 n,
         color += fresnel * pow(saturate(dot(n, hk)), 2.0 / max(a2, 0.002)) * _SpacedKeyLightColor * _SpacedKeyLight.w * 0.25;
     }
 
-    // Fill light from the camera's side so a craft in shadow still shows its shape, as in spaceflight footage
-    // shot with a bit of exposure to spare. Kept faint on and near the ground, where night should stay night.
-    float inSpace = saturate((altitude - 100000.0) / 2000000.0);
-    float fill = lerp(0.015, 0.17, inSpace);
+    // Fill light from the camera's side so a craft in Earth's shadow still shows its shape, as in spaceflight
+    // footage shot with a bit of exposure to spare. Full strength from low orbit up; kept faint on and near the
+    // ground, where night should stay night.
+    float inSpace = saturate((altitude - 20000.0) / 130000.0);
+    float fill = lerp(0.015, 0.2, inSpace);
     color += albedo * float3(0.86, 0.90, 1.0) * fill * (0.35 + 0.65 * saturate(dot(n, v)));
     return color;
 }

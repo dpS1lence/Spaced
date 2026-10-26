@@ -45,6 +45,8 @@ namespace Spaced
             orbitPath.Init(sim, FindShader("Spaced/UnlitColor"), rig.Far);
             var groundTrack = new GameObject("Ground Track", typeof(LineRenderer)).AddComponent<GroundTrackRenderer>();
             groundTrack.Init(sim, rig, FindShader("Spaced/UnlitColor"));
+            var preview = new GameObject("Launch Preview").AddComponent<LaunchPreviewRenderer>();
+            preview.Init(sim, rig, FindShader("Spaced/UnlitColor"));
 
             var materials = new MaterialLibrary(FindShader("Spaced/SpacecraftLit"));
             var fx = new Fx(FindShader("Spaced/Plume"), FindShader("Spaced/Smoke"));
@@ -63,6 +65,7 @@ namespace Spaced
             fleet.CloudCover = weather.CloudCover;
 
             hud.Init(sim, rig, launches, lunar, satellites, fleet);
+            hud.Preview = preview;
 
             var career = gameObject.AddComponent<CareerManager>();
             career.Init(sim, launches, lunar, fleet, rig);

@@ -256,7 +256,10 @@ namespace Spaced
 
             if (c.Kind == ContractKind.Imaging)
             {
-                GUILayout.Label("Your imaging satellites will photograph it on the first daylight pass within reach (see FLEET).", _small);
+                GUILayout.Label("Your imaging satellites photograph it automatically on the first daylight pass within 30° of straight down, " +
+                                "if the sky there is under 50% cloud.", _small);
+                var target = _fleet.Targets.Find(t => t.Name == c.Place && !t.Captured);
+                if (target != null) GUILayout.Label("Status: " + PassStatus(target), _accent);
                 if (GUILayout.Button("Show on the globe", _button)) { _rig.FlyTo(c.LatitudeDeg, c.LongitudeDeg, 1.5e6); }
             }
             else if (!c.Launched)
@@ -332,6 +335,7 @@ namespace Spaced
                             (profit >= 0 ? $"<color=#9fe39f>{Prices.Money(profit)}</color>" : $"<color=#ff6a5a>{Prices.Money(profit)}</color>"), _small);
             if (!c.IsLunar && c.InclinationDeg < pad.LatitudeDeg - 0.5)
                 GUILayout.Label($"Below {pad.ShortName}'s latitude: the orbit will be a bit more inclined than asked.", _warning);
+            if (!c.IsLunar) DrawContractPreview(c, pad);
             if (c.Starship && vehicle.Kind != VehicleKind.Starship) GUILayout.Label("This contract needs Starship.", _warning);
             GUI.enabled = Career.CanAfford(cost) && _sim.IsLoaded && (!c.Starship || vehicle.Kind == VehicleKind.Starship);
             if (GUILayout.Button(Career.CanAfford(cost) ? "Book the launch" : $"Need {Prices.Money(cost)}", _button, GUILayout.Height(26)))

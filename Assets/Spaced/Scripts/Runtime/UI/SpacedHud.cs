@@ -353,6 +353,8 @@ namespace Spaced
                 _spread = Slider("Altitude spread", _spread, 0, 200, "0 km");
             }
 
+            DrawOrbitPreview();
+
             _maneuverable = GUILayout.Toggle(_maneuverable, " Active (station-keeping, avoids collisions)");
             GUILayout.BeginHorizontal();
             GUILayout.Label("Name", _small, GUILayout.Width(40));
@@ -376,7 +378,8 @@ namespace Spaced
                                     $"{plan.Launches:N0} launch(es), one every ≥{LaunchManager.PadTurnaroundDays} days", _small);
                 if (_inclination < site.LatitudeDeg - 0.5f)
                     GUILayout.Label($"Below {site.ShortName}'s latitude ({site.LatitudeDeg:0.0}°): reached at the nearest inclination.", _warning);
-                DrawPadWeather(site, vehicle, _sim.Clock.JulianDate);
+                double liftoff = DrawLiftoffTime(site);
+                DrawPadWeather(site, vehicle, liftoff);
                 if (_launchMode == 1) _watchAll = GUILayout.Toggle(_watchAll, " Watch every launch (otherwise just the first)");
                 bool affordable = true;
                 if (CareerActive && !plan.TooHeavy)
@@ -450,7 +453,9 @@ namespace Spaced
                 return;
             }
 
-            var campaign = _launches.StartCampaign(name, SelectedVehicle, satClass, _maneuverable, LaunchSite.All[_siteIndex], slots, _launchMode == 0, _watchAll, group.Id);
+            var pad = LaunchSite.All[_siteIndex];
+            var campaign = _launches.StartCampaign(name, SelectedVehicle, satClass, _maneuverable, pad, slots, _launchMode == 0, _watchAll, group.Id,
+                _launches.EarliestLiftoffJd(pad, _liftoffDelayHours / 24.0));
             if (campaign == null)
             {
                 _launchMessage = $"Too heavy for {SelectedVehicle.Name}.";
@@ -766,12 +771,25 @@ namespace Spaced
             {
                 var t = _fleet.Targets[i];
                 GUILayout.BeginHorizontal();
-                GUILayout.Label($"{t.Name} · {t.LatitudeDeg:0.00}°, {t.LongitudeDeg:0.00}° · {(t.Captured ? "imaged" : "waiting for a pass")}", _small);
+                GUILayout.Label($"{t.Name} · {t.LatitudeDeg:0.00}°, {t.LongitudeDeg:0.00}° · {PassStatus(t)}", _small);
                 if (t.Captured && GUILayout.Button("View", _button, GUILayout.Width(44))) _viewer = t.Image;
                 if (GUILayout.Button("Go", _button, GUILayout.Width(30))) _rig.FlyTo(t.LatitudeDeg, t.LongitudeDeg, 60000);
                 if (GUILayout.Button("×", _button, GUILayout.Width(22))) { _fleet.Targets.RemoveAt(i); GUILayout.EndHorizontal(); break; }
                 GUILayout.EndHorizontal();
             }
+        }
+
+        /// <summary>Where a picture request stands: imaged, or when the next pass comes and whether it's too cloudy.</summary>
+        string PassStatus(ImagingTarget t)
+        {
+            if (t.Captured) return "imaged";
+            if (!_fleet.HasImagingSatellites) return "needs an imaging satellite in orbit";
+            double pass = _fleet.NextPass(t, out string satellite);
+            float cloud = _fleet.CloudCover?.Invoke(t.LatitudeDeg, t.LongitudeDeg) ?? 0f;
+            string when = !t.PassPredicted ? "working out the next pass…"
+                : double.IsNaN(pass) ? "no daylight pass in reach for 2 weeks: move the satellite to another orbit"
+                : $"next pass in {FormatDuration((pass - _sim.Clock.JulianDate) * MathConst.SecondsPerDay)} ({satellite})";
+            return when + $" · {cloud * 100:0}% cloud there now" + (cloud > FleetManager.MaxTargetCloud ? " (too cloudy: it waits for a clearer pass)" : "");
         }
 
         void ShowOnGlobe(CapturedImage image)
@@ -1389,6 +1407,20 @@ namespace Spaced
             Audio.Muted = GUILayout.Toggle(Audio.Muted, " Mute everything");
             Audio.MusicVolume = Slider("Music", Audio.MusicVolume * 100f, 0, 100, "0'%'") / 100f;
             Audio.EffectsVolume = Slider("Effects", Audio.EffectsVolume * 100f, 0, 100, "0'%'") / 100f;
+            GUILayout.Space(4);
+            GUILayout.Label("Music", _small);
+            Audio.Track = (MusicTrack)GUILayout.Toolbar((int)Audio.Track, new[] { "Cosmic", "Organ", "Your music" }, _button);
+            if (Audio.Track == MusicTrack.YourMusic)
+            {
+                GUILayout.Label(Audio.YourMusicCount == 0
+                    ? "No music yet: put .mp3, .ogg or .wav files you own in the music folder, then press Next."
+                    : $"Playing: {(Audio.NowPlaying.Length > 0 ? Audio.NowPlaying : "loading…")} ({Audio.YourMusicCount} files, shuffled)", _small);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Open music folder", _button)) Audio.OpenMusicFolder();
+                if (GUILayout.Button("Next", _button, GUILayout.Width(50))) Audio.NextTrack();
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.Label("Your volume and music choice are remembered.", _small);
             GUILayout.Label("Rocket sound travels at 343 m/s, so a distant camera hears liftoff late. No sound in vacuum, except through the onboard cameras.", _small);
         }
 
