@@ -9,6 +9,7 @@ cascades. When you're done, clean your satellites up again.
 See [Docs/GAME_PLAN.md](Docs/GAME_PLAN.md) for the design, the physics and the roadmap.
 
 ## Getting started
+<img width="1908" height="903" alt="Screenshot 2026-10-26 135049" src="https://github.com/user-attachments/assets/4507eb8c-2991-4288-bd8f-5c4b3460bcca" />
 
 1. Open the project in Unity **6000.4.5f1** and let the scripts compile.
 2. Run **Spaced → Set Up Project** from the menu bar (once). It switches URP to the 3D Universal
@@ -18,6 +19,8 @@ See [Docs/GAME_PLAN.md](Docs/GAME_PLAN.md) for the design, the physics and the r
    in `Application.persistentDataPath`.
 
 ### Your first launch
+<img width="1903" height="905" alt="Screenshot 2026-10-26 134843" src="https://github.com/user-attachments/assets/68b12cad-0d6b-4b78-9e65-871fb75c3e68" />
+
 In the **Launch** panel keep *Falcon 9 from pad* and *SLC-40*, pick **Constellation → preset
 "One Starlink launch (20 sats, 1 plane)"**, then press **Schedule**. The game finds the next launch
 window (when the pad passes under the target orbit plane) and slows time down as it approaches. The
