@@ -313,6 +313,37 @@ namespace Spaced
             return loop;
         }
 
+        /// <summary>Seamless rushing-air loop for flying: soft filtered noise with slow gusts, crossfaded at the seam.</summary>
+        public static float[] Wind(double seconds = 6.0, int seed = 21)
+        {
+            int n = (int)(seconds * SampleRate), fade = SampleRate / 2;
+            var random = new Random(seed);
+            var raw = new float[n + fade];
+            double low = 0, band = 0;
+            for (int i = 0; i < raw.Length; i++)
+            {
+                double t = i / (double)SampleRate;
+                double white = random.NextDouble() * 2 - 1;
+                low += (white - low) * 0.02;    // the roar
+                band += (white - band) * 0.15;  // the hiss on top
+                // Gusts complete whole cycles per loop, so they carry on smoothly across the seam.
+                double gust = 0.75 + 0.25 * Math.Sin(TwoPi * 2.0 / seconds * t) * Math.Sin(TwoPi * 3.0 / seconds * t + 1.0);
+                raw[i] = (float)((low * 6.0 + (band - low) * 0.35) * gust);
+            }
+            var loop = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                if (i < fade)
+                {
+                    float w = i / (float)fade;
+                    loop[i] = raw[i] * w + raw[n + i] * (1 - w);
+                }
+                else loop[i] = raw[i];
+            }
+            Normalize(loop, 0.8f);
+            return loop;
+        }
+
         /// <summary>Supersonic booster coming home: the double "ba-boom" heard before a landing.</summary>
         public static float[] SonicBoom(int seed = 5)
         {

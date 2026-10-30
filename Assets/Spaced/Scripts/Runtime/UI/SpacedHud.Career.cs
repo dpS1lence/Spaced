@@ -143,6 +143,33 @@ namespace Spaced
             }
         }
 
+        // ───────────────────────────── Superhero ─────────────────────────────
+
+        public HeroController Hero;
+
+        /// <summary>Superhero mode is a sandbox toy.</summary>
+        bool HeroAvailable => Hero != null && !CareerActive && _sim.IsLoaded;
+
+        void DrawHeroBar(Rect rect)
+        {
+            GUILayout.BeginArea(rect, _window);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("<b>SUPERHERO</b>", _header, GUILayout.Width(100));
+            double kmh = Hero.SpeedMs * 3.6;
+            string speed = kmh < 10000 ? $"{kmh:N0} km/h" : FormatSpeed(Hero.SpeedMs / 1000.0);
+            string where = Hero.NearMoon ? "near the Moon" : $"over {math.abs(Hero.LatDeg):0.00}°{(Hero.LatDeg >= 0 ? "N" : "S")} {math.abs(Hero.LonDeg):0.00}°{(Hero.LonDeg >= 0 ? "E" : "W")}";
+            string state = Hero.Grounded ? "standing" : Hero.Boosting ? "super speed" : Hero.SpeedMs > 343 && !Hero.NearMoon && Hero.AltitudeM < 40000 ? "supersonic" : "flying";
+            GUILayout.Label($"{speed} · {FormatKm(Hero.AltitudeM / 1000.0)} up · {where} · {state}", _label);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button($"Face {Hero.FaceTargetName} (M)", _button, GUILayout.Width(160))) Hero.FaceTarget();
+            if (GUILayout.Button("Leave (P)", _button, GUILayout.Width(90))) Hero.Leave();
+            GUILayout.EndHorizontal();
+            GUILayout.Label(Hero.MouseCaptured
+                ? "Mouse look · W/A/S/D fly where you look · Space / Ctrl up / down · Shift super speed · M face the Moon · Scroll camera · Esc free the mouse"
+                : "<b>Click the view to take control</b> · P to leave · speed grows with height: fly up to go faster, all the way to the Moon", _small);
+            GUILayout.EndArea();
+        }
+
         static string FormatKm(double km) => km < 1 ? $"{km * 1000:N0} m" : km < 10000 ? $"{km:N0} km" : $"{km / 1000:N0} thousand km";
 
         static string FormatSpeed(double kmS) => kmS < 1 ? $"{kmS * 1000:N0} m/s" : kmS < 1000 ? $"{kmS:N1} km/s" : $"{kmS:N0} km/s";

@@ -36,6 +36,8 @@ namespace Spaced
         public double3 PositionKm;
         public double3 Forward;
         public double3 Up;
+        /// <summary>Vertical field of view in degrees; 0 keeps the onboard cameras' 70°.</summary>
+        public float FovDeg;
     }
 
     /// <summary>
@@ -455,7 +457,7 @@ namespace Spaced
                 var pose = _onboard?.Invoke() ?? default;
                 rotation = Quaternion.LookRotation(Astro.EciToUnity(pose.Forward), Astro.EciToUnity(pose.Up));
                 offsetM = Vector3.zero;
-                SetFieldOfView(70f);
+                SetFieldOfView(pose.FovDeg > 0 ? pose.FovDeg : 70f);
             }
             else if (Mode == ViewMode.GroundTracking)
             {
@@ -494,7 +496,14 @@ namespace Spaced
             // The far camera's near plane follows the height above the nearer of the Earth and the Moon, so you can get
             // close to either without clipping it.
             double moonAltitudeKm = math.length(CameraEciKm - Astro.MoonPosition(jd)) - MoonConstants.RadiusKm;
-            double altitudeM = math.max(math.min(CameraAltitudeKm, moonAltitudeKm) * 1000.0, 1.0);
+            // Low down, measure from the terrain rather than sea level, or the clip plane cuts into nearby hills.
+            double groundKm = 0;
+            if (CameraAltitudeKm < 20)
+            {
+                Astro.EcefToGeo(Astro.EciToEcef(CameraEciKm, jd), out double cameraLat, out double cameraLon, out _);
+                groundKm = math.max(GroundKm(cameraLat, cameraLon), 0);
+            }
+            double altitudeM = math.max(math.min(CameraAltitudeKm - groundKm, moonAltitudeKm) * 1000.0, 1.0);
             Far.nearClipPlane = (float)(math.clamp(altitudeM * 0.3, 1.0, 500000.0) / WorldFrame.MetersPerFarUnit);
             MetersPerPixel = Distance * 2.0 * math.tan(Far.fieldOfView * 0.5 * MathConst.Deg2Rad) / math.max(Screen.height, 1);
             UpdateCursorGeo(jd);

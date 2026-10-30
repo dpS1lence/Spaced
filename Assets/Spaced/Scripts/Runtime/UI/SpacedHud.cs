@@ -133,6 +133,15 @@ namespace Spaced
             if (keyboard == null || GUIUtility.keyboardControl != 0) return;
             var clock = _sim.Clock;
 
+            // While flying, the flight keys are his: only P (leave) and H (hide the HUD) still work.
+            if (Hero != null && Hero.Active)
+            {
+                if (keyboard.pKey.wasPressedThisFrame) Hero.Leave();
+                if (keyboard.hKey.wasPressedThisFrame || keyboard.f1Key.wasPressedThisFrame) _visible = !_visible;
+                return;
+            }
+            if (keyboard.pKey.wasPressedThisFrame && HeroAvailable) Hero.Enter();
+
             if (keyboard.spaceKey.wasPressedThisFrame) clock.Paused = !clock.Paused;
             if (keyboard.periodKey.wasPressedThisFrame || keyboard.equalsKey.wasPressedThisFrame) clock.Faster();
             if (keyboard.commaKey.wasPressedThisFrame || keyboard.minusKey.wasPressedThisFrame) clock.Slower();
@@ -179,6 +188,15 @@ namespace Spaced
             var topBar = new Rect(0, 0, width, 34);
             DrawTopBar(topBar);
             _blockingRects.Add(topBar);
+
+            if (Hero != null && Hero.Active)
+            {
+                // Flying: just the flight bar, the view is his.
+                var bar = new Rect(width * 0.5f - 430, height - 66, 860, 58);
+                DrawHeroBar(bar);
+                _blockingRects.Add(bar);
+                return;
+            }
 
             if (Cinematic.Active)
             {
@@ -263,6 +281,12 @@ namespace Spaced
             if (!CareerActive && GUILayout.Button("Now", _button, GUILayout.Width(44))) clock.JumpTo(System.DateTime.UtcNow);
             if (GUILayout.Button("Earth view", _button, GUILayout.Width(80))) BackToEarth();
             if (GUILayout.Toggle(_rig.Mode == ViewMode.Free, "Free roam", _button, GUILayout.Width(80)) != (_rig.Mode == ViewMode.Free)) ToggleFreeRoam();
+            if (HeroAvailable || (Hero != null && Hero.Active))
+                if (GUILayout.Toggle(Hero.Active, "Superhero", _button, GUILayout.Width(80)) != Hero.Active)
+                {
+                    if (Hero.Active) Hero.Leave();
+                    else Hero.Enter();
+                }
             _rig.LockToEarth = GUILayout.Toggle(_rig.LockToEarth, "Lock to Earth", _button, GUILayout.Width(100));
 
             DrawCareerTopBar();

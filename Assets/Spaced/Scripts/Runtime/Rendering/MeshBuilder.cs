@@ -30,6 +30,12 @@ namespace Spaced
         HeatTile,
         /// <summary>Lunar regolith (landing sites).</summary>
         Regolith,
+        // The superhero.
+        HeroSuit,
+        HeroCape,
+        HeroSkin,
+        HeroHair,
+        HeroBelt,
     }
 
     /// <summary>A mesh whose submeshes map to <see cref="Surface"/>s.</summary>

@@ -77,6 +77,10 @@ namespace Spaced
             var audio = gameObject.AddComponent<SpacedAudio>();
             audio.Init(sim, rig, launches, fleet, hud.IsPointerOverUI);
             hud.Audio = audio;
+
+            var hero = new GameObject("Superhero Mode").AddComponent<HeroController>();
+            hero.Init(sim, rig, launches, lunar, materials, audio, hud.IsPointerOverUI);
+            hud.Hero = hero;
         }
 
         static Shader FindShader(string shaderName)

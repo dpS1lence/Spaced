@@ -51,8 +51,9 @@ namespace Spaced
         LaunchManager _launches;
         System.Func<Vector2, bool> _isPointerOverUi;
 
-        AudioSource _music, _roar, _effects;
-        AudioLowPassFilter _roarFilter;
+        AudioSource _music, _roar, _effects, _wind;
+        AudioLowPassFilter _roarFilter, _windFilter;
+        float _windLevel, _windTone;
         AudioClip _boom, _thunk, _thunkLow, _hiss, _click, _tick, _chime, _shutter;
         readonly Dictionary<MusicTrack, Task<float[]>> _renders = new Dictionary<MusicTrack, Task<float[]>>();
         readonly Dictionary<MusicTrack, AudioClip> _loops = new Dictionary<MusicTrack, AudioClip>();
@@ -89,6 +90,11 @@ namespace Spaced
             _roar.clip = Clip("Roar", Synth.Rumble(), 1);
             _roar.volume = 0;
             _roar.Play();
+            _wind = NewSource("Wind", true);
+            _windFilter = _wind.gameObject.AddComponent<AudioLowPassFilter>();
+            _wind.clip = Clip("Wind", Synth.Wind(), 1);
+            _wind.volume = 0;
+            _wind.Play();
             _boom = Clip("Sonic Boom", Synth.SonicBoom(), 1);
             _thunk = Clip("Thunk", Synth.Thunk(), 1);
             _thunkLow = Clip("Touchdown", Synth.Thunk(0.6), 1);
@@ -293,6 +299,27 @@ namespace Spaced
             return clip;
         }
 
+        /// <summary>A sonic boom, for things that break the sound barrier right by the camera (the superhero).</summary>
+        public void PlayBoom(float volume = 1f) => Play(_boom, volume);
+
+        /// <summary>
+        /// Rushing air while flying: <paramref name="level"/> 0–1 sets the loudness, <paramref name="tone"/> 0–1 how
+        /// bright it sounds (faster is brighter). Eased, so it can be set every frame.
+        /// </summary>
+        public void SetWind(float level, float tone)
+        {
+            _windLevel = Mathf.Clamp01(level);
+            _windTone = Mathf.Clamp01(tone);
+        }
+
+        void UpdateWind()
+        {
+            float target = Muted ? 0 : _windLevel * EffectsVolume * 0.7f;
+            _wind.volume = Mathf.MoveTowards(_wind.volume, target, Time.unscaledDeltaTime * 1.5f);
+            _windFilter.cutoffFrequency = Mathf.Lerp(_windFilter.cutoffFrequency, Mathf.Lerp(350f, 5000f, _windTone), 1f - Mathf.Exp(-Time.unscaledDeltaTime * 4f));
+            _wind.pitch = Mathf.Lerp(0.8f, 1.25f, _windTone);
+        }
+
         void Play(AudioClip clip, float volume)
         {
             if (!Muted) _effects.PlayOneShot(clip, volume * EffectsVolume);
@@ -311,6 +338,7 @@ namespace Spaced
                 Play(_click, 0.35f);
 
             UpdateLaunchAudio();
+            UpdateWind();
 
             for (int i = _scheduled.Count - 1; i >= 0; i--)
             {

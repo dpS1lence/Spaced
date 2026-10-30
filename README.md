@@ -110,6 +110,20 @@ Moon: WASD or the arrows to fly, Q/E down and up, hold Shift to go faster, drag 
 scroll to zoom. The buttons jump to the Earth, the Moon or a view of both; the camera moves with
 whichever body you're near, so the Moon doesn't run away at high time warp. Esc or G goes back.
 
+### Superhero mode (sandbox)
+
+Press **P** (or **Superhero** in the top bar) to become a caped flyer standing on the ground where the
+globe camera was looking. Click the view to take the controls:
+
+- Mouse: look. **W/A/S/D**: fly where you look. **Space / Ctrl**: straight up / down (Ctrl lands you).
+- **Shift**: super speed. **Scroll**: camera distance. **M**: turn to face the Moon (or the Earth from
+  the Moon). **Esc**: free the mouse. **P**: back to the globe.
+
+Speed grows with height: a jog at street level, the speed of sound a little higher (with a sonic
+boom), and the Moon in about 15 seconds at super speed. He slows as he nears the ground again, so you
+can land anywhere, the Moon included. Near the ground the view follows the curve of the Earth, and a
+soft light keeps him visible at night.
+
 ## Starship
 
 Starship launches from Starbase, Texas: 33 Raptors, hot staging, a boostback burn and a catch by the

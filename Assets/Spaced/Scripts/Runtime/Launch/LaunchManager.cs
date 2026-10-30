@@ -569,6 +569,7 @@ namespace Spaced
         {
             Cinematic.ClearLights();
             if (Cinematic.Active && Watched?.View != null) Watched.View.PublishLights();
+            else Cinematic.PublishOtherLights?.Invoke();
         }
 
         /// <summary>Orbit plane the mission flies into: the target plane at liftoff, or whatever "launch now" gives.</summary>

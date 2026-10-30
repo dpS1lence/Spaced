@@ -45,6 +45,11 @@ namespace Spaced
             Add(Surface.Stainless, new Color(0.93f, 0.96f, 1.0f), 0.65f, 1f, ProceduralTextures.Stainless());
             Add(Surface.HeatTile, Color.white, 0f, 1f, ProceduralTextures.HeatTiles());
             Add(Surface.Regolith, Color.white, 0f, 1f, ProceduralTextures.Regolith());
+            Add(Surface.HeroSuit, new Color(0.09f, 0.20f, 0.62f), 0f, 0.5f);
+            Add(Surface.HeroCape, new Color(0.74f, 0.06f, 0.07f), 0f, 0.35f);
+            Add(Surface.HeroSkin, new Color(0.86f, 0.63f, 0.50f), 0f, 0.3f);
+            Add(Surface.HeroHair, new Color(0.04f, 0.035f, 0.035f), 0f, 0.6f);
+            Add(Surface.HeroBelt, new Color(1.0f, 0.78f, 0.25f), 1f, 0.65f);
             var light = Add(Surface.WarningLight, new Color(0.3f, 0.05f, 0.05f), 0f, 0.5f);
             light.SetVector(Emission, new Vector4(6f, 0.4f, 0.2f, 1f)); // HDR, so no gamma conversion
             light.SetFloat(NightEmission, 1f);

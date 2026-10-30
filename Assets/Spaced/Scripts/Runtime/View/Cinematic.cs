@@ -20,6 +20,9 @@ namespace Spaced
         /// <summary>Set each frame by the launch preview (globe view only): the catalogue's dots are left out so its lines stand out.</summary>
         public static bool PreviewHidesSatellites;
 
+        /// <summary>Lights something other than a watched launch (the superhero); called each frame once the lights are cleared.</summary>
+        public static System.Action PublishOtherLights;
+
         static readonly int KeyLight = Shader.PropertyToID("_SpacedKeyLight");
         static readonly int KeyLightColor = Shader.PropertyToID("_SpacedKeyLightColor");
         static readonly int Glow0 = Shader.PropertyToID("_SpacedGlow0");
